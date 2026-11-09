@@ -293,19 +293,23 @@ std::shared_ptr<WaveData> DecodeWithMF(const Task& task, std::wstring& error) {
     IMFMediaType* actual = nullptr;
     const DWORD stream = MF_SOURCE_READER_FIRST_AUDIO_STREAM;
     std::shared_ptr<WaveData> wave;
-    HRESULT hr = MFCreateSourceReaderFromURL(task.path.c_str(), nullptr, &reader);
-    if (SUCCEEDED(hr)) hr = MFCreateMediaType(&desired);
-    if (SUCCEEDED(hr)) hr = desired->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
-    if (SUCCEEDED(hr)) hr = desired->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_PCM);
-    if (SUCCEEDED(hr)) hr = desired->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, 16);
-    if (SUCCEEDED(hr)) hr = reader->SetCurrentMediaType(stream, nullptr, desired);
-    if (SUCCEEDED(hr)) hr = reader->GetCurrentMediaType(stream, &actual);
+    HRESULT hr = S_OK;
+    std::wstring stage = L"ouverture du fichier";
+    hr = MFCreateSourceReaderFromURL(task.path.c_str(), nullptr, &reader);
+    if (SUCCEEDED(hr)) { stage = L"creation du format"; hr = MFCreateMediaType(&desired); }
+    if (SUCCEEDED(hr)) { stage = L"type audio"; hr = desired->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio); }
+    if (SUCCEEDED(hr)) { stage = L"format PCM"; hr = desired->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_PCM); }
+    if (SUCCEEDED(hr)) { stage = L"PCM 16 bits"; hr = desired->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, 16); }
+    if (SUCCEEDED(hr)) { stage = L"activation du decodeur PCM"; hr = reader->SetCurrentMediaType(stream, nullptr, desired); }
+    if (SUCCEEDED(hr)) { stage = L"lecture du format PCM"; hr = reader->GetCurrentMediaType(stream, &actual); }
     UINT32 rate = 0, channels = 0, bits = 0;
-    if (SUCCEEDED(hr)) hr = actual->GetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, &rate);
-    if (SUCCEEDED(hr)) hr = actual->GetUINT32(MF_MT_AUDIO_NUM_CHANNELS, &channels);
-    if (SUCCEEDED(hr)) hr = actual->GetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, &bits);
+    if (SUCCEEDED(hr)) { stage = L"frequence audio"; hr = actual->GetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, &rate); }
+    if (SUCCEEDED(hr)) { stage = L"canaux audio"; hr = actual->GetUINT32(MF_MT_AUDIO_NUM_CHANNELS, &channels); }
+    if (SUCCEEDED(hr)) { stage = L"bits audio"; hr = actual->GetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, &bits); }
     if (FAILED(hr) || rate == 0 || channels == 0 || channels > 32 || bits != 16) {
-        error = L"Decodage indisponible pour ce format (Media Foundation).";
+        wchar_t hrCode[32]{};
+        swprintf_s(hrCode, 32, L"0x%08lX", static_cast<unsigned long>(hr));
+        error = L"Echec Media Foundation (" + stage + L", " + hrCode + L").";
     } else {
         wave = std::make_shared<WaveData>();
         const uint64_t bucketFrames = std::max<UINT32>(1, rate / 20); // ~50 ms
@@ -670,8 +674,14 @@ void DrawWave(HDC dc) {
     if (!g_wave || g_wave->peaks.empty()) {
         std::wstring msg = g_isLoading
             ? L"ANALYSE EN COURS : " + std::to_wstring(g_progress.load()) + L" %"
-            : L"WAVEFORM NON CHARGEE";
-        Text(dc, msg, inner, MUTED, DT_CENTER | DT_SINGLELINE | DT_VCENTER, g_bigFont);
+            : (g_status.find(L"Echec") != std::wstring::npos ||
+               g_status.find(L"Erreur") != std::wstring::npos ||
+               g_status.find(L"indisponible") != std::wstring::npos ||
+               g_status.find(L"Impossible") != std::wstring::npos ||
+               g_status.find(L"introuvable") != std::wstring::npos ||
+               g_status.find(L"Aucune") != std::wstring::npos)
+                  ? g_status : L"WAVEFORM NON CHARGEE";
+        Text(dc, msg, inner, MUTED, DT_CENTER | DT_WORDBREAK | DT_VCENTER, g_bigFont);
         if (g_isLoading) {
             RECT bar{inner.left + 20, cy + 45, inner.right - 20, cy + 51};
             RectFill(dc, bar, BORDER);
