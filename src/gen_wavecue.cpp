@@ -90,7 +90,6 @@ std::wstring g_playingPath;
 int64_t g_playheadMs = -1;
 Cues g_cues;
 Cues g_playbackCues;
-bool g_autoApply = false;
 bool g_skipSent = false;
 bool g_isLoading = false;
 std::wstring g_status = L"Selectionnez un morceau dans la playlist de Winamp.";
@@ -191,6 +190,7 @@ Cues LoadCues(const std::wstring& path) {
         long long ms = -1;
         if (sscanf_s(line, "S=%lld", &ms) == 1 && ms >= 0) result.start_ms = ms;
         else if (sscanf_s(line, "E=%lld", &ms) == 1 && ms >= 0) result.end_ms = ms;
+        else if (sscanf_s(line, "A=%lld", &ms) == 1) result.auto_apply = (ms == 1);
         else if (sscanf_s(line, "C=%lld", &ms) == 1 && ms >= 0 && result.marks.size() < 10000)
             result.marks.push_back(ms);
     }
@@ -207,6 +207,7 @@ void SaveCues(const std::wstring& path, const Cues& c) {
     fputs("# WaveCue v1\n", f);
     if (c.start_ms >= 0) fprintf(f, "S=%lld\n", static_cast<long long>(c.start_ms));
     if (c.end_ms >= 0) fprintf(f, "E=%lld\n", static_cast<long long>(c.end_ms));
+    fprintf(f, "A=%d\n", c.auto_apply ? 1 : 0);
     for (auto ms : c.marks) fprintf(f, "C=%lld\n", static_cast<long long>(ms));
     if (fclose(f) == 0) {
         if (!MoveFileExW(temp.c_str(), dest.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
@@ -218,21 +219,6 @@ void CommitCues() {
     wavecue::tidy(g_cues);
     SaveCues(g_selectedPath, g_cues);
     if (g_selectedPath == g_playingPath) g_playbackCues = g_cues;
-}
-
-void SaveSettings() {
-    FILE* f = nullptr;
-    if (_wfopen_s(&f, (g_dataDir + L"\\settings.txt").c_str(), L"wb") != 0 || !f) return;
-    fprintf(f, "AUTO=%d\n", g_autoApply ? 1 : 0);
-    fclose(f);
-}
-
-void ReadSettings() {
-    FILE* f = nullptr;
-    if (_wfopen_s(&f, (g_dataDir + L"\\settings.txt").c_str(), L"rb") != 0 || !f) return;
-    int autoFlag = 0;
-    if (fscanf_s(f, "AUTO=%d", &autoFlag) == 1) g_autoApply = autoFlag != 0;
-    fclose(f);
 }
 
 #pragma pack(push,1)
@@ -593,11 +579,11 @@ void PollWinamp() {
         g_playingPath = playPath;
         g_playbackCues = LoadCues(playPath);
         g_skipSent = false;
-        if (g_autoApply && active && g_playbackCues.start_ms > 0)
+        if (g_playbackCues.auto_apply && active && g_playbackCues.start_ms > 0)
             SendMessageW(g_winamp, WM_WA_IPC, static_cast<WPARAM>(g_playbackCues.start_ms), IPC_JUMPTOTIME);
     }
     g_playheadMs = active ? static_cast<int64_t>(SendMessageW(g_winamp, WM_WA_IPC, 0, IPC_GETOUTPUTTIME)) : -1;
-    if (g_autoApply && state == 1 && g_playbackCues.end_ms >= 0 && !g_skipSent &&
+    if (g_playbackCues.auto_apply && state == 1 && g_playbackCues.end_ms >= 0 && !g_skipSent &&
         g_playheadMs >= g_playbackCues.end_ms) {
         g_skipSent = true;
         PostMessageW(g_winamp, WM_COMMAND, WINAMP_BUTTON5, 0);
@@ -676,7 +662,7 @@ void Layout(int width, int height) {
     for (auto& b : specs) {
         if (x != left && x + b.w > width - left) { x = left; y += btnHeight + gap; }
         g_buttons.push_back({b.id, {x,y,x+b.w,y+btnHeight},
-                            b.label, b.id == BUTTON_LOAD ? !g_selectedPath.empty() : !g_selectedPath.empty() && !!g_wave});
+                            b.label, (b.id == BUTTON_LOAD || b.id == BUTTON_AUTO) ? !g_selectedPath.empty() : !g_selectedPath.empty() && !!g_wave});
         x += b.w + gap;
     }
     g_plot = {left, y + btnHeight + 22, std::max(left + 120, width - left),
@@ -690,7 +676,7 @@ COLORREF ButtonColor(const Button& b) {
         (b.id == BUTTON_END && g_mode == ModeEnd) ||
         (b.id == BUTTON_DELETE && g_mode == ModeDelete) ||
         (b.id == BUTTON_DELETE && g_marker == MarkerNone && g_mode == ModeNone && g_hover == BUTTON_DELETE) ||
-        (b.id == BUTTON_AUTO && g_autoApply)) return RGB(29, 89, 87);
+        (b.id == BUTTON_AUTO && g_cues.auto_apply)) return RGB(29, 89, 87);
     return b.id == g_hover ? RGB(52, 70, 84) : PANEL;
 }
 
@@ -878,10 +864,17 @@ void ActivateButton(int id) {
             : L"Mode suppression termine.";
         break;
     case BUTTON_AUTO:
-        g_autoApply = !g_autoApply;
-        SaveSettings();
-        g_status = g_autoApply ? L"Limites IN/OUT automatiques activees (titre en lecture uniquement)."
-                               : L"Limites IN/OUT automatiques desactivees.";
+        if (!g_selectedPath.empty()) {
+            g_cues.auto_apply = !g_cues.auto_apply;
+            CommitCues();
+            // A new activation on the current track must not cause an accidental
+            // immediate OUT skip; it applies at the next boundary crossing.
+            if (g_cues.auto_apply && _wcsicmp(g_selectedPath.c_str(), g_playingPath.c_str()) == 0)
+                g_skipSent = (g_cues.end_ms >= 0 && g_playheadMs >= g_cues.end_ms);
+            g_status = g_cues.auto_apply
+                ? L"Auto IN/OUT actif pour ce morceau seulement."
+                : L"Auto IN/OUT desactive pour ce morceau.";
+        }
         break;
     default: break;
     }
@@ -1044,7 +1037,6 @@ bool MakeStorage() {
 static int PluginInit() {
     g_winamp = g_plugin.hwndParent;
     if (!g_winamp || !MakeStorage()) return 1;
-    ReadSettings();
     WNDCLASSEXW cls{};
     cls.cbSize = sizeof(cls);
     cls.lpfnWndProc = WaveWndProc;
@@ -1104,7 +1096,6 @@ static void PluginQuit() {
     }
     g_taskWake.notify_one();
     if (g_worker.joinable()) g_worker.join();
-    SaveSettings();
     if (g_hwnd) DestroyWindow(g_hwnd);
     g_hwnd = nullptr;
     if (g_font) DeleteObject(g_font);
