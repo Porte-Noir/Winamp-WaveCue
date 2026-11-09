@@ -128,7 +128,7 @@ constexpr COLORREF START = RGB(104, 209, 145);
 constexpr COLORREF END = RGB(239, 111, 123);
 
 RECT g_plot = {34, 130, 1040, 435};
-enum Mode { ModeNone, ModeAdd, ModeStart, ModeEnd, ModeDelete };
+enum Mode { ModeNone, ModeSeek, ModeStart, ModeEnd, ModeDelete };
 Mode g_mode = ModeNone;
 enum Marker { MarkerNone, MarkerCue, MarkerStart, MarkerEnd };
 Marker g_marker = MarkerNone;
@@ -140,7 +140,7 @@ POINT g_down = {0,0};
 struct Button { int id; RECT bounds; const wchar_t* text; bool enabled; };
 std::vector<Button> g_buttons;
 int g_hover = 0;
-constexpr int BUTTON_LOAD = 1, BUTTON_CUE = 2, BUTTON_START = 3,
+constexpr int BUTTON_LOAD = 1, BUTTON_SEEK = 2, BUTTON_START = 3,
               BUTTON_END = 4, BUTTON_DELETE = 5, BUTTON_AUTO = 6;
 
 std::wstring FileLabel(const std::wstring& path) {
@@ -651,7 +651,7 @@ void Layout(int width, int height) {
     const int left = 28, top = 78, btnHeight = 34, gap = 8;
     const struct { int id, w; const wchar_t* label; } specs[] = {
         {BUTTON_LOAD, 185, L"Show/Load Waveform"},
-        {BUTTON_CUE, 93, L"Add Cue"},
+        {BUTTON_SEEK, 93, L"Seek"},
         {BUTTON_START, 91, L"Set IN"},
         {BUTTON_END, 92, L"Set OUT"},
         {BUTTON_DELETE, 93, L"Delete"},
@@ -671,7 +671,7 @@ void Layout(int width, int height) {
 
 COLORREF ButtonColor(const Button& b) {
     if (!b.enabled) return RGB(29, 34, 43);
-    if ((b.id == BUTTON_CUE && g_mode == ModeAdd) ||
+    if ((b.id == BUTTON_SEEK && g_mode == ModeSeek) ||
         (b.id == BUTTON_START && g_mode == ModeStart) ||
         (b.id == BUTTON_END && g_mode == ModeEnd) ||
         (b.id == BUTTON_DELETE && g_mode == ModeDelete) ||
@@ -783,11 +783,11 @@ void Paint(HWND hwnd) {
     RECT status{28, h - 66, w - 28, h - 42};
     Text(dc, g_status, status, MUTED, DT_SINGLELINE | DT_END_ELLIPSIS | DT_VCENTER);
     RECT tip{28, h - 41, w - 28, h - 10};
-    std::wstring hint = g_mode == ModeAdd ? L"Cliquez sur la waveform pour ajouter un cue (Echap : annuler)."
+    std::wstring hint = g_mode == ModeSeek ? L"SEEK ARME : un seul clic sur la waveform deplace la lecture, puis se desactive."
         : g_mode == ModeStart ? L"Cliquez sur la waveform pour placer IN."
         : g_mode == ModeEnd ? L"Cliquez sur la waveform pour placer OUT."
         : g_mode == ModeDelete ? L"DELETE : cliquez sur un repere pour supprimer SANS deplacer la lecture."
-        : L"Cue = repere de navigation sauvegarde. Clic pour sauter, glisser pour deplacer. Delete puis clic pour effacer.";
+        : L"Lecture protegee : activez SEEK pour sauter. Les anciens reperes restent disponibles pour suppression.";
     Text(dc, hint, tip, RGB(103, 115, 128), DT_SINGLELINE | DT_END_ELLIPSIS);
     BitBlt(target, 0, 0, w, h, dc, 0, 0, SRCCOPY);
     SelectObject(dc, previousBmp);
@@ -854,7 +854,12 @@ bool MoveMarker(int64_t ms) {
 void ActivateButton(int id) {
     switch (id) {
     case BUTTON_LOAD: RequestLoad(); break;
-    case BUTTON_CUE: g_mode = g_mode == ModeAdd ? ModeNone : ModeAdd; break;
+    case BUTTON_SEEK:
+        g_mode = g_mode == ModeSeek ? ModeNone : ModeSeek;
+        g_status = g_mode == ModeSeek
+            ? L"SEEK ARME : cliquez sur la waveform pour sauter (un seul saut). Echap pour annuler."
+            : L"Seek desactive : clics sans effet sur la lecture.";
+        break;
     case BUTTON_START: g_mode = g_mode == ModeStart ? ModeNone : ModeStart; break;
     case BUTTON_END: g_mode = g_mode == ModeEnd ? ModeNone : ModeEnd; break;
     case BUTTON_DELETE:
@@ -891,9 +896,20 @@ void ClickPlot(POINT pt) {
         InvalidateRect(g_hwnd, nullptr, FALSE);
         return;
     }
-    if (g_mode == ModeAdd) {
-        ok = wavecue::add_mark(g_cues, ms, PlotDuration());
-    } else if (g_mode == ModeStart) {
+    if (g_mode == ModeSeek) {
+        g_mode = ModeNone; // Disarm before sending IPC to Winamp.
+        if (g_selectedIndex == g_playingIndex &&
+            _wcsicmp(g_selectedPath.c_str(), g_playingPath.c_str()) == 0 &&
+            g_playheadMs >= 0) {
+            SeekPlaying(ms);
+            g_status = L"Seek effectue vers " + TimeLabel(ms) + L". Mode Seek desactive.";
+        } else {
+            g_status = L"Seek desactive. Lancez la lecture du titre selectionne pour vous deplacer.";
+        }
+        InvalidateRect(g_hwnd, nullptr, FALSE);
+        return;
+    }
+    if (g_mode == ModeStart) {
         ok = wavecue::set_start(g_cues, ms, PlotDuration());
     } else if (g_mode == ModeEnd) {
         ok = wavecue::set_end(g_cues, ms, PlotDuration());
@@ -905,16 +921,14 @@ void ClickPlot(POINT pt) {
             SetCapture(g_hwnd);
         } else {
             ClearMarker();
-            SeekPlaying(ms);
+            g_status = L"Lecture protegee : activez SEEK avant un deplacement.";
         }
         InvalidateRect(g_hwnd, nullptr, FALSE);
         return;
     }
     if (ok) {
         CommitCues();
-        g_status = g_mode == ModeAdd
-            ? L"Cue sauvegarde : " + TimeLabel(ms) + L". Cliquez sur sa ligne pour y revenir."
-            : L"Repere sauvegarde : " + TimeLabel(ms);
+        g_status = L"Repere sauvegarde : " + TimeLabel(ms);
         g_mode = ModeNone;
     } else g_status = L"Repere invalide ou trop proche d'un autre cue.";
     InvalidateRect(g_hwnd, nullptr, FALSE);
@@ -966,13 +980,8 @@ LRESULT CALLBACK WaveWndProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
                     g_status = L"Limites IN/OUT incompatibles.";
                 }
             } else if (g_marker != MarkerNone) {
-                int64_t seekTime = -1;
-                if (g_marker == MarkerStart) seekTime = g_cues.start_ms;
-                if (g_marker == MarkerEnd) seekTime = g_cues.end_ms;
-                if (g_marker == MarkerCue && g_markerIndex >= 0 &&
-                    static_cast<size_t>(g_markerIndex) < g_cues.marks.size())
-                    seekTime = g_cues.marks[static_cast<size_t>(g_markerIndex)];
-                if (seekTime >= 0) SeekPlaying(seekTime);
+                // Selecting an existing marker must never seek implicitly.
+                g_status = L"Repere selectionne. Activez SEEK pour deplacer la lecture.";
             }
             InvalidateRect(hwnd, nullptr, FALSE);
         }
