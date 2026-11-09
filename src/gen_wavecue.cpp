@@ -432,6 +432,15 @@ void CancelAnalysis() {
     g_progress = 0;
 }
 
+void Layout(int width, int height);
+
+void RefreshButtonLayout() {
+    if (!g_hwnd || !IsWindow(g_hwnd)) return;
+    RECT client{};
+    if (GetClientRect(g_hwnd, &client))
+        Layout(client.right - client.left, client.bottom - client.top);
+}
+
 void ChangeSelected(int index, const std::wstring& path) {
     if (g_selectedIndex == index && g_selectedPath == path) return;
     CancelAnalysis();
@@ -445,6 +454,7 @@ void ChangeSelected(int index, const std::wstring& path) {
     g_dragging = false;
     if (path.empty()) g_status = L"Selectionnez un titre dans le Playlist Editor.";
     else g_status = L"Waveform vide. Cliquez sur Show/Load Waveform.";
+    RefreshButtonLayout();
     InvalidateRect(g_hwnd, nullptr, FALSE);
 }
 
@@ -461,6 +471,7 @@ void RequestLoad() {
         g_wave = std::move(cached);
         g_isLoading = false;
         g_status = L"Waveform chargee depuis le cache.";
+        RefreshButtonLayout();
         InvalidateRect(g_hwnd, nullptr, FALSE);
         return;
     }
