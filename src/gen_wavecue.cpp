@@ -1,0 +1,1023 @@
+// Winamp WaveCue — a lightweight general-purpose Winamp 5.x (32-bit) plugin.
+// Windows 7 SP1 or later; decoder: Windows Media Foundation (no audio engine replacement).
+// Copyright 2026. Distributed under the MIT license (see LICENSE).
+#define NOMINMAX
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <mfapi.h>
+#include <mfidl.h>
+#include <mfreadwrite.h>
+#include <mferror.h>
+#include <shlobj.h>
+#include <windowsx.h>
+#include <commctrl.h>
+#include <limits>
+#include <algorithm>
+#include <atomic>
+#include <cmath>
+#include <condition_variable>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cwchar>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <utility>
+#include <vector>
+#include "core.hpp"
+
+#pragma comment(lib, "mfplat.lib")
+#pragma comment(lib, "mfreadwrite.lib")
+#pragma comment(lib, "mfuuid.lib")
+#pragma comment(lib, "ole32.lib")
+#pragma comment(lib, "shell32.lib")
+#pragma comment(lib, "gdi32.lib")
+#pragma comment(lib, "user32.lib")
+
+// Small, self-contained definitions from the Winamp 5 general-purpose plugin SDK.
+// Read the full reference: https://github.com/hugovk/winamp/blob/master/wa_ipc.h
+#define WM_WA_IPC (WM_USER)
+#define IPC_ISPLAYING 104
+#define IPC_GETOUTPUTTIME 105
+#define IPC_JUMPTOTIME 106
+#define IPC_GETLISTPOS 125
+#define IPC_GETPLAYLISTFILE 211
+#define IPC_GETPLAYLISTFILEW 214
+#define IPC_PLAYLIST_GET_NEXT_SELECTED 3029
+#define WINAMP_BUTTON5 40048
+#define WM_WAVE_RESULT (WM_APP + 24)
+#define TIMER_POLL 11
+
+struct winampGeneralPurposePlugin {
+    int version;
+    char* description;
+    int (*init)();
+    void (*config)();
+    void (*quit)();
+    HWND hwndParent;
+    HINSTANCE hDllInstance;
+};
+
+static int PluginInit();
+static void PluginConfig();
+static void PluginQuit();
+static char kDescription[] = "WaveCue - Waveform et Cue Editor 1.0";
+static winampGeneralPurposePlugin g_plugin = {
+    0x10, kDescription, PluginInit, PluginConfig, PluginQuit, nullptr, nullptr
+};
+extern "C" __declspec(dllexport) winampGeneralPurposePlugin* __cdecl
+winampGetGeneralPurposePlugin() { return &g_plugin; }
+
+namespace {
+using wavecue::Cues;
+
+// Plugin state on the Winamp/UI thread.
+HWND g_hwnd = nullptr;
+std::atomic<HWND> g_noticeHwnd{nullptr};
+HWND g_winamp = nullptr;
+HFONT g_font = nullptr;
+HFONT g_bigFont = nullptr;
+std::wstring g_dataDir;
+std::wstring g_cacheDir;
+std::wstring g_selectedPath;
+int g_selectedIndex = -1;
+int g_playingIndex = -1;
+std::wstring g_playingPath;
+int64_t g_playheadMs = -1;
+Cues g_cues;
+Cues g_playbackCues;
+bool g_autoApply = false;
+bool g_skipSent = false;
+bool g_isLoading = false;
+std::wstring g_status = L"Selectionnez un morceau dans la playlist de Winamp.";
+
+struct WaveData {
+    uint64_t duration_ms = 0;
+    std::vector<uint16_t> peaks;
+};
+std::shared_ptr<WaveData> g_wave;
+
+// Decoding runs exclusively in a background MTA thread.
+struct FileStamp { uint64_t size = 0; uint64_t modified = 0; };
+struct Task { std::wstring path; FileStamp stamp; uint64_t generation = 0; };
+struct Result {
+    Task task;
+    std::shared_ptr<WaveData> wave;
+    std::wstring error;
+};
+std::mutex g_taskMutex;
+std::condition_variable g_taskWake;
+std::unique_ptr<Task> g_pendingTask;
+std::unique_ptr<Result> g_completed;
+std::atomic<uint64_t> g_generation{0};
+std::atomic<int> g_progress{0};
+std::thread g_worker;
+bool g_workerStop = false;
+
+constexpr COLORREF BG = RGB(15, 18, 25);
+constexpr COLORREF PANEL = RGB(24, 30, 40);
+constexpr COLORREF BORDER = RGB(53, 64, 78);
+constexpr COLORREF TEXT = RGB(227, 232, 239);
+constexpr COLORREF MUTED = RGB(145, 159, 173);
+constexpr COLORREF ACCENT = RGB(66, 202, 196);
+constexpr COLORREF CUE = RGB(245, 193, 107);
+constexpr COLORREF START = RGB(104, 209, 145);
+constexpr COLORREF END = RGB(239, 111, 123);
+
+RECT g_plot = {34, 130, 1040, 435};
+enum Mode { ModeNone, ModeAdd, ModeStart, ModeEnd };
+Mode g_mode = ModeNone;
+enum Marker { MarkerNone, MarkerCue, MarkerStart, MarkerEnd };
+Marker g_marker = MarkerNone;
+int g_markerIndex = -1;
+bool g_dragging = false;
+bool g_moved = false;
+POINT g_down = {0,0};
+
+struct Button { int id; RECT bounds; const wchar_t* text; bool enabled; };
+std::vector<Button> g_buttons;
+int g_hover = 0;
+constexpr int BUTTON_LOAD = 1, BUTTON_CUE = 2, BUTTON_START = 3,
+              BUTTON_END = 4, BUTTON_DELETE = 5, BUTTON_AUTO = 6;
+
+std::wstring FileLabel(const std::wstring& path) {
+    size_t pos = path.find_last_of(L"\\/");
+    return pos == std::wstring::npos ? path : path.substr(pos + 1);
+}
+
+std::wstring TimeLabel(int64_t ms) {
+    if (ms < 0) return L"--:--";
+    wchar_t buf[64]{};
+    uint64_t v = static_cast<uint64_t>(ms);
+    swprintf_s(buf, 64, L"%llu:%02llu.%03llu", v / 60000,
+               (v / 1000) % 60, v % 1000);
+    return buf;
+}
+
+bool ReadFileStamp(const std::wstring& path, FileStamp& out) {
+    WIN32_FILE_ATTRIBUTE_DATA d{};
+    if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &d)) return false;
+    if (d.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) return false;
+    out.size = (static_cast<uint64_t>(d.nFileSizeHigh) << 32) | d.nFileSizeLow;
+    out.modified = (static_cast<uint64_t>(d.ftLastWriteTime.dwHighDateTime) << 32)
+                 | d.ftLastWriteTime.dwLowDateTime;
+    return true;
+}
+
+std::wstring HexHash(const std::wstring& path) {
+    wchar_t buf[32]{};
+    swprintf_s(buf, 32, L"%016llx", wavecue::path_hash(path));
+    return buf;
+}
+
+std::wstring CuePath(const std::wstring& path) {
+    return g_dataDir + L"\\cues_" + HexHash(path) + L".txt";
+}
+std::wstring CachePath(const std::wstring& path) {
+    return g_cacheDir + L"\\" + HexHash(path) + L".wfc";
+}
+
+Cues LoadCues(const std::wstring& path) {
+    Cues result;
+    if (path.empty()) return result;
+    FILE* f = nullptr;
+    if (_wfopen_s(&f, CuePath(path).c_str(), L"rb") != 0 || !f) return result;
+    char line[128]{};
+    while (fgets(line, sizeof line, f)) {
+        long long ms = -1;
+        if (sscanf_s(line, "S=%lld", &ms) == 1 && ms >= 0) result.start_ms = ms;
+        else if (sscanf_s(line, "E=%lld", &ms) == 1 && ms >= 0) result.end_ms = ms;
+        else if (sscanf_s(line, "C=%lld", &ms) == 1 && ms >= 0 && result.marks.size() < 10000)
+            result.marks.push_back(ms);
+    }
+    fclose(f);
+    wavecue::tidy(result);
+    return result;
+}
+
+void SaveCues(const std::wstring& path, const Cues& c) {
+    if (path.empty()) return;
+    const std::wstring dest = CuePath(path), temp = dest + L".tmp";
+    FILE* f = nullptr;
+    if (_wfopen_s(&f, temp.c_str(), L"wb") != 0 || !f) return;
+    fputs("# WaveCue v1\n", f);
+    if (c.start_ms >= 0) fprintf(f, "S=%lld\n", static_cast<long long>(c.start_ms));
+    if (c.end_ms >= 0) fprintf(f, "E=%lld\n", static_cast<long long>(c.end_ms));
+    for (auto ms : c.marks) fprintf(f, "C=%lld\n", static_cast<long long>(ms));
+    if (fclose(f) == 0) {
+        if (!MoveFileExW(temp.c_str(), dest.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+            DeleteFileW(temp.c_str());
+    } else DeleteFileW(temp.c_str());
+}
+
+void CommitCues() {
+    wavecue::tidy(g_cues);
+    SaveCues(g_selectedPath, g_cues);
+    if (g_selectedPath == g_playingPath) g_playbackCues = g_cues;
+}
+
+void SaveSettings() {
+    FILE* f = nullptr;
+    if (_wfopen_s(&f, (g_dataDir + L"\\settings.txt").c_str(), L"wb") != 0 || !f) return;
+    fprintf(f, "AUTO=%d\n", g_autoApply ? 1 : 0);
+    fclose(f);
+}
+
+void ReadSettings() {
+    FILE* f = nullptr;
+    if (_wfopen_s(&f, (g_dataDir + L"\\settings.txt").c_str(), L"rb") != 0 || !f) return;
+    int autoFlag = 0;
+    if (fscanf_s(f, "AUTO=%d", &autoFlag) == 1) g_autoApply = autoFlag != 0;
+    fclose(f);
+}
+
+#pragma pack(push,1)
+struct CacheHeader {
+    uint32_t magic;       // WCUE
+    uint32_t version;
+    uint64_t file_size;
+    uint64_t last_write;
+    uint64_t duration_ms;
+    uint32_t interval_ms;
+    uint32_t peak_count;
+};
+#pragma pack(pop)
+static_assert(sizeof(CacheHeader) == 40, "Cache header must be stable");
+constexpr uint32_t CACHE_MAGIC = 0x45554357u;
+
+std::shared_ptr<WaveData> LoadCache(const Task& task) {
+    FILE* f = nullptr;
+    if (_wfopen_s(&f, CachePath(task.path).c_str(), L"rb") != 0 || !f) return {};
+    CacheHeader hdr{};
+    if (fread(&hdr, sizeof hdr, 1, f) != 1 || hdr.magic != CACHE_MAGIC ||
+        hdr.version != 1 || hdr.file_size != task.stamp.size ||
+        hdr.last_write != task.stamp.modified || hdr.interval_ms != 50 ||
+        hdr.peak_count == 0 || hdr.peak_count > 1000000 || hdr.duration_ms == 0) {
+        fclose(f);
+        return {};
+    }
+    auto wave = std::make_shared<WaveData>();
+    wave->duration_ms = hdr.duration_ms;
+    wave->peaks.resize(hdr.peak_count);
+    if (fread(wave->peaks.data(), sizeof(uint16_t), hdr.peak_count, f) != hdr.peak_count) {
+        fclose(f);
+        return {};
+    }
+    fclose(f);
+    return wave;
+}
+
+void SaveCache(const Task& task, const WaveData& wave) {
+    if (wave.peaks.empty() || wave.peaks.size() > 1000000) return;
+    FileStamp current{};
+    if (!ReadFileStamp(task.path, current) || current.size != task.stamp.size ||
+        current.modified != task.stamp.modified) return;
+    std::wstring dest = CachePath(task.path), temp = dest + L".tmp";
+    FILE* f = nullptr;
+    if (_wfopen_s(&f, temp.c_str(), L"wb") != 0 || !f) return;
+    CacheHeader hdr{CACHE_MAGIC, 1, current.size, current.modified,
+                    wave.duration_ms, 50, static_cast<uint32_t>(wave.peaks.size())};
+    bool ok = fwrite(&hdr, sizeof hdr, 1, f) == 1 &&
+        fwrite(wave.peaks.data(), sizeof(uint16_t), wave.peaks.size(), f) == wave.peaks.size();
+    if (fclose(f) != 0) ok = false;
+    if (!ok || !MoveFileExW(temp.c_str(), dest.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+        DeleteFileW(temp.c_str());
+}
+
+// Strictly sequential 16-bit PCM decode. Peak data uses only ~72 KB per 30 minutes.
+std::shared_ptr<WaveData> DecodeWithMF(const Task& task, std::wstring& error) {
+    IMFSourceReader* reader = nullptr;
+    IMFMediaType* desired = nullptr;
+    IMFMediaType* actual = nullptr;
+    const DWORD stream = MF_SOURCE_READER_FIRST_AUDIO_STREAM;
+    std::shared_ptr<WaveData> wave;
+    HRESULT hr = MFCreateSourceReaderFromURL(task.path.c_str(), nullptr, &reader);
+    if (SUCCEEDED(hr)) hr = MFCreateMediaType(&desired);
+    if (SUCCEEDED(hr)) hr = desired->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
+    if (SUCCEEDED(hr)) hr = desired->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_PCM);
+    if (SUCCEEDED(hr)) hr = desired->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, 16);
+    if (SUCCEEDED(hr)) hr = reader->SetCurrentMediaType(stream, nullptr, desired);
+    if (SUCCEEDED(hr)) hr = reader->GetCurrentMediaType(stream, &actual);
+    UINT32 rate = 0, channels = 0, bits = 0;
+    if (SUCCEEDED(hr)) hr = actual->GetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, &rate);
+    if (SUCCEEDED(hr)) hr = actual->GetUINT32(MF_MT_AUDIO_NUM_CHANNELS, &channels);
+    if (SUCCEEDED(hr)) hr = actual->GetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, &bits);
+    if (FAILED(hr) || rate == 0 || channels == 0 || channels > 32 || bits != 16) {
+        error = L"Decodage indisponible pour ce format (Media Foundation).";
+    } else {
+        wave = std::make_shared<WaveData>();
+        const uint64_t bucketFrames = std::max<UINT32>(1, rate / 20); // ~50 ms
+        uint64_t frameCount = 0;
+        uint64_t estimatedFrames = 0;
+        PROPVARIANT prop;
+        PropVariantInit(&prop);
+        if (SUCCEEDED(reader->GetPresentationAttribute(MF_SOURCE_READER_MEDIASOURCE, MF_PD_DURATION, &prop)) &&
+            prop.vt == VT_UI8) estimatedFrames = prop.uhVal.QuadPart * rate / 10000000u;
+        PropVariantClear(&prop);
+        bool finished = false;
+        while (!finished && g_generation.load() == task.generation) {
+            DWORD flags = 0;
+            IMFSample* sample = nullptr;
+            hr = reader->ReadSample(stream, 0, nullptr, &flags, nullptr, &sample);
+            if (FAILED(hr)) {
+                error = L"Erreur de lecture audio pendant l'analyse.";
+                if (sample) sample->Release();
+                wave.reset();
+                break;
+            }
+            if (flags & MF_SOURCE_READERF_ENDOFSTREAM) finished = true;
+            if (sample) {
+                IMFMediaBuffer* buffer = nullptr;
+                hr = sample->ConvertToContiguousBuffer(&buffer);
+                if (SUCCEEDED(hr) && buffer) {
+                    BYTE* bytes = nullptr;
+                    DWORD maxLength = 0, length = 0;
+                    hr = buffer->Lock(&bytes, &maxLength, &length);
+                    if (SUCCEEDED(hr)) {
+                        const auto* pcm = reinterpret_cast<const int16_t*>(bytes);
+                        const uint64_t frames = length / (sizeof(int16_t) * channels);
+                        for (uint64_t i = 0; i < frames; ++i, ++frameCount) {
+                            size_t bin = static_cast<size_t>(frameCount / bucketFrames);
+                            if (bin >= 1000000) { error = L"Morceau trop long pour cette version."; break; }
+                            if (bin >= wave->peaks.size()) wave->peaks.resize(bin + 1, 0);
+                            int maximum = 0;
+                            for (UINT32 ch = 0; ch < channels; ++ch) {
+                                const int s = static_cast<int>(pcm[i * channels + ch]);
+                                maximum = std::max(maximum, s < 0 ? -s : s);
+                            }
+                            wave->peaks[bin] = static_cast<uint16_t>(
+                                std::max<int>(wave->peaks[bin], std::min(maximum, 32767)));
+                        }
+                        buffer->Unlock();
+                        if (!error.empty()) wave.reset();
+                    }
+                    buffer->Release();
+                }
+                sample->Release();
+                if (FAILED(hr)) { error = L"Erreur de conversion PCM."; wave.reset(); break; }
+                if (!wave) break;
+            }
+            if (estimatedFrames > 0) {
+                const int pct = static_cast<int>(std::min<uint64_t>(99, (frameCount / std::max<uint64_t>(1, estimatedFrames / 100))));
+                g_progress.store(pct);
+            }
+            // Yield occasionally to avoid competing aggressively with Winamp's audio thread.
+            Sleep(0);
+        }
+        if (g_generation.load() != task.generation) wave.reset();
+        if (wave && frameCount && !wave->peaks.empty())
+            wave->duration_ms = std::max<uint64_t>(1, frameCount * 1000 / rate);
+        else if (wave) { error = L"Aucune donnee audio exploitable."; wave.reset(); }
+    }
+    if (actual) actual->Release();
+    if (desired) desired->Release();
+    if (reader) reader->Release();
+    return wave;
+}
+
+void WorkerMain() {
+    const HRESULT comHr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    const bool comReady = SUCCEEDED(comHr);
+    const HRESULT mfHr = comReady ? MFStartup(MF_VERSION, MFSTARTUP_LITE) : E_FAIL;
+    const bool mfReady = SUCCEEDED(mfHr);
+    for (;;) {
+        Task task;
+        {
+            std::unique_lock<std::mutex> lk(g_taskMutex);
+            g_taskWake.wait(lk, [] { return g_workerStop || g_pendingTask != nullptr; });
+            if (g_workerStop) break;
+            task = *g_pendingTask;
+            g_pendingTask.reset();
+        }
+        auto result = std::make_unique<Result>();
+        result->task = task;
+        if (mfReady) result->wave = DecodeWithMF(task, result->error);
+        else result->error = L"Windows Media Foundation n'est pas disponible.";
+        if (task.generation != g_generation.load()) continue;
+        if (result->wave) SaveCache(task, *result->wave);
+        if (task.generation != g_generation.load()) continue;
+        {
+            std::lock_guard<std::mutex> lk(g_taskMutex);
+            g_completed = std::move(result);
+        }
+        if (HWND target = g_noticeHwnd.load()) PostMessageW(target, WM_WAVE_RESULT, 0, 0);
+    }
+    if (mfReady) MFShutdown();
+    if (comReady) CoUninitialize();
+}
+
+std::wstring PlaylistPath(int index) {
+    if (index < 0 || !g_winamp || !IsWindow(g_winamp)) return L"";
+    auto p = SendMessageW(g_winamp, WM_WA_IPC, static_cast<WPARAM>(index), IPC_GETPLAYLISTFILEW);
+    if (p > 1) return reinterpret_cast<const wchar_t*>(p);
+    auto narrow = SendMessageW(g_winamp, WM_WA_IPC, static_cast<WPARAM>(index), IPC_GETPLAYLISTFILE);
+    if (narrow <= 1) return L"";
+    auto s = reinterpret_cast<const char*>(narrow);
+    int n = MultiByteToWideChar(CP_ACP, 0, s, -1, nullptr, 0);
+    if (n <= 1) return L"";
+    std::wstring wide(static_cast<size_t>(n), L'\0');
+    MultiByteToWideChar(CP_ACP, 0, s, -1, &wide[0], n);
+    wide.pop_back();
+    return wide;
+}
+
+void CancelAnalysis() {
+    ++g_generation;
+    std::lock_guard<std::mutex> lk(g_taskMutex);
+    g_pendingTask.reset();
+    g_completed.reset();
+    g_isLoading = false;
+    g_progress = 0;
+}
+
+void ChangeSelected(int index, const std::wstring& path) {
+    if (g_selectedIndex == index && g_selectedPath == path) return;
+    CancelAnalysis();
+    g_selectedIndex = index;
+    g_selectedPath = path;
+    g_cues = LoadCues(path);
+    g_wave.reset();
+    g_mode = ModeNone;
+    g_marker = MarkerNone;
+    g_markerIndex = -1;
+    g_dragging = false;
+    if (path.empty()) g_status = L"Selectionnez un titre dans le Playlist Editor.";
+    else g_status = L"Waveform vide. Cliquez sur Show/Load Waveform.";
+    InvalidateRect(g_hwnd, nullptr, FALSE);
+}
+
+void RequestLoad() {
+    if (g_selectedPath.empty()) return;
+    FileStamp stamp{};
+    if (!ReadFileStamp(g_selectedPath, stamp)) {
+        g_status = L"Fichier local introuvable (les streams ne sont pas pris en charge).";
+        InvalidateRect(g_hwnd, nullptr, FALSE);
+        return;
+    }
+    Task task{g_selectedPath, stamp, ++g_generation};
+    if (auto cached = LoadCache(task)) {
+        g_wave = std::move(cached);
+        g_isLoading = false;
+        g_status = L"Waveform chargee depuis le cache.";
+        InvalidateRect(g_hwnd, nullptr, FALSE);
+        return;
+    }
+    g_wave.reset();
+    g_progress = 0;
+    g_isLoading = true;
+    g_status = L"Analyse audio en cours...";
+    {
+        std::lock_guard<std::mutex> lk(g_taskMutex);
+        g_pendingTask = std::make_unique<Task>(std::move(task));
+    }
+    g_taskWake.notify_one();
+    InvalidateRect(g_hwnd, nullptr, FALSE);
+}
+
+void AcceptWorkerResult() {
+    std::unique_ptr<Result> done;
+    {
+        std::lock_guard<std::mutex> lk(g_taskMutex);
+        done = std::move(g_completed);
+    }
+    if (!done || done->task.generation != g_generation.load() || done->task.path != g_selectedPath) return;
+    g_isLoading = false;
+    g_wave = std::move(done->wave);
+    g_status = g_wave ? L"Waveform prete. Cliquez pour naviguer ou placer un cue."
+                      : (done->error.empty() ? L"Impossible d'analyser ce fichier." : done->error);
+    InvalidateRect(g_hwnd, nullptr, FALSE);
+}
+
+int64_t PlotDuration() {
+    return g_wave ? static_cast<int64_t>(g_wave->duration_ms) : 0;
+}
+
+int XAt(int64_t ms) {
+    const int w = std::max(1L, g_plot.right - g_plot.left - 20L);
+    int64_t len = std::max<int64_t>(1, PlotDuration());
+    return g_plot.left + 10 + static_cast<int>((wavecue::clamp_ms(ms, len) * w) / len);
+}
+
+int64_t MsAt(int x) {
+    const int w = std::max(1L, g_plot.right - g_plot.left - 20L);
+    int px = std::clamp(x - g_plot.left - 10, 0, w);
+    return static_cast<int64_t>(px) * PlotDuration() / w;
+}
+
+bool IsInPlot(POINT pt) {
+    return PtInRect(&g_plot, pt) != 0;
+}
+
+void SeekPlaying(int64_t ms) {
+    // Never interrupt the currently playing track to preview a different selection.
+    if (!g_winamp || g_selectedPath != g_playingPath || g_playingIndex < 0) return;
+    int state = static_cast<int>(SendMessageW(g_winamp, WM_WA_IPC, 0, IPC_ISPLAYING));
+    if (state == 1 || state == 3)
+        SendMessageW(g_winamp, WM_WA_IPC, static_cast<WPARAM>(ms), IPC_JUMPTOTIME);
+}
+
+void PollWinamp() {
+    if (!g_winamp || !IsWindow(g_winamp)) return;
+    const int playing = static_cast<int>(SendMessageW(g_winamp, WM_WA_IPC, 0, IPC_GETLISTPOS));
+    const std::wstring playPath = playing >= 0 ? PlaylistPath(playing) : L"";
+    const int state = static_cast<int>(SendMessageW(g_winamp, WM_WA_IPC, 0, IPC_ISPLAYING));
+    const bool active = state == 1 || state == 3;
+    const bool trackChanged = (g_playingIndex != playing || g_playingPath != playPath);
+    if (trackChanged) {
+        g_playingIndex = playing;
+        g_playingPath = playPath;
+        g_playbackCues = LoadCues(playPath);
+        g_skipSent = false;
+        if (g_autoApply && active && g_playbackCues.start_ms > 0)
+            SendMessageW(g_winamp, WM_WA_IPC, static_cast<WPARAM>(g_playbackCues.start_ms), IPC_JUMPTOTIME);
+    }
+    g_playheadMs = active ? static_cast<int64_t>(SendMessageW(g_winamp, WM_WA_IPC, 0, IPC_GETOUTPUTTIME)) : -1;
+    if (g_autoApply && state == 1 && g_playbackCues.end_ms >= 0 && !g_skipSent &&
+        g_playheadMs >= g_playbackCues.end_ms) {
+        g_skipSent = true;
+        PostMessageW(g_winamp, WM_COMMAND, WINAMP_BUTTON5, 0);
+    }
+    if (!active) g_skipSent = false;
+}
+
+void SelectPlaylistItem() {
+    if (!g_winamp || !IsWindow(g_winamp)) return;
+    int idx = static_cast<int>(SendMessageW(g_winamp, WM_WA_IPC,
+                                            static_cast<WPARAM>(-1), IPC_PLAYLIST_GET_NEXT_SELECTED));
+    if (idx < 0) ChangeSelected(-1, L"");
+    else ChangeSelected(idx, PlaylistPath(idx));
+}
+
+} // anonymous namespace
+
+namespace {
+
+bool EqualPaths(const std::wstring& a, const std::wstring& b) {
+    return _wcsicmp(a.c_str(), b.c_str()) == 0;
+}
+
+void RectFill(HDC dc, const RECT& rect, COLORREF color) {
+    HBRUSH brush = CreateSolidBrush(color);
+    FillRect(dc, &rect, brush);
+    DeleteObject(brush);
+}
+
+void RectOutline(HDC dc, RECT rect, COLORREF color) {
+    HPEN pen = CreatePen(PS_SOLID, 1, color);
+    HGDIOBJ oldPen = SelectObject(dc, pen);
+    HGDIOBJ oldBrush = SelectObject(dc, GetStockObject(HOLLOW_BRUSH));
+    Rectangle(dc, rect.left, rect.top, rect.right, rect.bottom);
+    SelectObject(dc, oldBrush);
+    SelectObject(dc, oldPen);
+    DeleteObject(pen);
+}
+
+void Line(HDC dc, int x1, int y1, int x2, int y2, COLORREF color, int thickness = 1) {
+    HPEN pen = CreatePen(PS_SOLID, thickness, color);
+    HGDIOBJ old = SelectObject(dc, pen);
+    MoveToEx(dc, x1, y1, nullptr);
+    LineTo(dc, x2, y2);
+    SelectObject(dc, old);
+    DeleteObject(pen);
+}
+
+void Text(HDC dc, const std::wstring& value, RECT rect, COLORREF color, UINT flags,
+          HFONT font = nullptr) {
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, color);
+    HGDIOBJ prev = SelectObject(dc, font ? font : g_font);
+    DrawTextW(dc, value.c_str(), -1, &rect, flags | DT_NOPREFIX);
+    SelectObject(dc, prev);
+}
+
+int ButtonUnder(POINT pt) {
+    for (const auto& b : g_buttons)
+        if (b.enabled && PtInRect(&b.bounds, pt)) return b.id;
+    return 0;
+}
+
+void Layout(int width, int height) {
+    const int left = 28, top = 78, btnHeight = 34, gap = 8;
+    const struct { int id, w; const wchar_t* label; } specs[] = {
+        {BUTTON_LOAD, 185, L"Show/Load Waveform"},
+        {BUTTON_CUE, 93, L"Add Cue"},
+        {BUTTON_START, 91, L"Set IN"},
+        {BUTTON_END, 92, L"Set OUT"},
+        {BUTTON_DELETE, 93, L"Delete"},
+        {BUTTON_AUTO, 139, L"Auto IN/OUT"},
+    };
+    g_buttons.clear();
+    int x = left, y = top;
+    for (auto& b : specs) {
+        if (x != left && x + b.w > width - left) { x = left; y += btnHeight + gap; }
+        g_buttons.push_back({b.id, {x,y,x+b.w,y+btnHeight},
+                            b.label, b.id == BUTTON_LOAD ? !g_selectedPath.empty() : !g_selectedPath.empty() && !!g_wave});
+        x += b.w + gap;
+    }
+    g_plot = {left, y + btnHeight + 22, std::max(left + 120, width - left),
+              std::max(y + btnHeight + 132, height - 112)};
+}
+
+COLORREF ButtonColor(const Button& b) {
+    if (!b.enabled) return RGB(29, 34, 43);
+    if ((b.id == BUTTON_CUE && g_mode == ModeAdd) ||
+        (b.id == BUTTON_START && g_mode == ModeStart) ||
+        (b.id == BUTTON_END && g_mode == ModeEnd) ||
+        (b.id == BUTTON_DELETE && g_marker == MarkerNone && g_mode == ModeNone && g_hover == BUTTON_DELETE) ||
+        (b.id == BUTTON_AUTO && g_autoApply)) return RGB(29, 89, 87);
+    return b.id == g_hover ? RGB(52, 70, 84) : PANEL;
+}
+
+void DrawButtons(HDC dc) {
+    for (const auto& b : g_buttons) {
+        RectFill(dc, b.bounds, ButtonColor(b));
+        RectOutline(dc, b.bounds, b.enabled ? BORDER : RGB(41, 48, 56));
+        Text(dc, b.text, b.bounds, b.enabled ? TEXT : RGB(99, 113, 125),
+             DT_SINGLELINE | DT_CENTER | DT_VCENTER);
+    }
+}
+
+void DrawMarker(HDC dc, int64_t ms, COLORREF color, const wchar_t* label, bool large = true) {
+    if (ms < 0 || !g_wave) return;
+    int x = XAt(ms);
+    Line(dc, x, g_plot.top + 2, x, g_plot.bottom - 2, color, large ? 2 : 1);
+    RECT tag{x + 3, g_plot.top + 4, x + 74, g_plot.top + 24};
+    if (tag.right > g_plot.right) { tag.left = x - 73; tag.right = x - 2; }
+    Text(dc, label, tag, color, DT_LEFT | DT_SINGLELINE);
+}
+
+void DrawWave(HDC dc) {
+    RectFill(dc, g_plot, PANEL);
+    RectOutline(dc, g_plot, BORDER);
+    RECT inner = g_plot;
+    InflateRect(&inner, -10, -9);
+    const int cy = (inner.top + inner.bottom) / 2;
+    Line(dc, inner.left, cy, inner.right, cy, RGB(57, 72, 86));
+    if (!g_wave || g_wave->peaks.empty()) {
+        std::wstring msg = g_isLoading
+            ? L"ANALYSE EN COURS : " + std::to_wstring(g_progress.load()) + L" %"
+            : L"WAVEFORM NON CHARGEE";
+        Text(dc, msg, inner, MUTED, DT_CENTER | DT_SINGLELINE | DT_VCENTER, g_bigFont);
+        if (g_isLoading) {
+            RECT bar{inner.left + 20, cy + 45, inner.right - 20, cy + 51};
+            RectFill(dc, bar, BORDER);
+            bar.right = bar.left + (bar.right - bar.left) * g_progress.load() / 100;
+            RectFill(dc, bar, ACCENT);
+        }
+        return;
+    }
+    int innerW = std::max(1, inner.right - inner.left);
+    int half = std::max(1, (inner.bottom - inner.top) / 2 - 7);
+    const size_t n = g_wave->peaks.size();
+    // One peak per display pixel. Draw complexity is bounded by window width.
+    HPEN pen = CreatePen(PS_SOLID, 1, ACCENT);
+    HGDIOBJ previous = SelectObject(dc, pen);
+    for (int x = 0; x < innerW; ++x) {
+        size_t a = static_cast<size_t>((static_cast<uint64_t>(x) * n) / innerW);
+        size_t b = std::min(n, static_cast<size_t>((static_cast<uint64_t>(x + 1) * n) / innerW));
+        b = std::max(b, a + 1);
+        uint16_t maxPeak = 0;
+        for (size_t i = a; i < b; ++i) maxPeak = std::max(maxPeak, g_wave->peaks[i]);
+        int amp = std::max(1, static_cast<int>((static_cast<uint64_t>(maxPeak) * half) / 32768));
+        MoveToEx(dc, inner.left + x, cy - amp, nullptr);
+        LineTo(dc, inner.left + x, cy + amp + 1);
+    }
+    SelectObject(dc, previous);
+    DeleteObject(pen);
+
+    if (g_cues.start_ms >= 0)
+        DrawMarker(dc, g_cues.start_ms, START, L"IN");
+    if (g_cues.end_ms >= 0)
+        DrawMarker(dc, g_cues.end_ms, END, L"OUT");
+    for (size_t i = 0; i < g_cues.marks.size(); ++i) {
+        int x = XAt(g_cues.marks[i]);
+        Line(dc, x, inner.top, x, inner.bottom, CUE);
+        RECT tag{x + 2, inner.bottom - 22, x + 48, inner.bottom - 2};
+        Text(dc, std::to_wstring(i + 1), tag, CUE, DT_SINGLELINE);
+    }
+    // Only show playback position for the file currently playing in Winamp.
+    if (g_playheadMs >= 0 && EqualPaths(g_selectedPath, g_playingPath)) {
+        int x = XAt(g_playheadMs);
+        Line(dc, x, g_plot.top + 1, x, g_plot.bottom - 1, RGB(246, 246, 248), 2);
+    }
+    RECT base{inner.left, g_plot.bottom + 10, inner.right, g_plot.bottom + 34};
+    Text(dc, L"0:00", base, MUTED, DT_SINGLELINE | DT_LEFT);
+    Text(dc, TimeLabel(PlotDuration()), base, MUTED, DT_SINGLELINE | DT_RIGHT);
+}
+
+void Paint(HWND hwnd) {
+    PAINTSTRUCT ps{};
+    HDC target = BeginPaint(hwnd, &ps);
+    RECT full{};
+    GetClientRect(hwnd, &full);
+    int w = std::max(1L, full.right - full.left), h = std::max(1L, full.bottom - full.top);
+    HDC dc = CreateCompatibleDC(target);
+    HBITMAP bitmap = CreateCompatibleBitmap(target, w, h);
+    HGDIOBJ previousBmp = SelectObject(dc, bitmap);
+    RectFill(dc, full, BG);
+    RECT title{28, 14, w - 28, 45};
+    Text(dc, L"WAVECUE", title, TEXT, DT_SINGLELINE | DT_LEFT | DT_VCENTER, g_bigFont);
+    RECT filename{165, 16, w - 28, 44};
+    Text(dc, g_selectedPath.empty() ? L"Aucun morceau selectionne" : FileLabel(g_selectedPath),
+         filename, ACCENT, DT_SINGLELINE | DT_END_ELLIPSIS | DT_VCENTER);
+    DrawButtons(dc);
+    DrawWave(dc);
+    RECT status{28, h - 66, w - 28, h - 42};
+    Text(dc, g_status, MUTED, DT_SINGLELINE | DT_END_ELLIPSIS | DT_VCENTER);
+    RECT tip{28, h - 41, w - 28, h - 10};
+    std::wstring hint = g_mode == ModeAdd ? L"Cliquez sur la waveform pour ajouter un cue (Echap : annuler)."
+        : g_mode == ModeStart ? L"Cliquez sur la waveform pour placer IN."
+        : g_mode == ModeEnd ? L"Cliquez sur la waveform pour placer OUT."
+        : L"Cue : clic pour sauter (titre en lecture), glisser pour deplacer ; Suppr : effacer le cue selectionne.";
+    Text(dc, hint, tip, RGB(103, 115, 128), DT_SINGLELINE | DT_END_ELLIPSIS);
+    BitBlt(target, 0, 0, w, h, dc, 0, 0, SRCCOPY);
+    SelectObject(dc, previousBmp);
+    DeleteObject(bitmap);
+    DeleteDC(dc);
+    EndPaint(hwnd, &ps);
+}
+
+void ClearMarker() { g_marker = MarkerNone; g_markerIndex = -1; }
+
+bool MarkAtX(int x) {
+    ClearMarker();
+    if (!g_wave) return false;
+    int bestDistance = 9;
+    auto inspect = [&](int64_t ms, Marker marker, int index) {
+        if (ms < 0) return;
+        int distance = abs(x - XAt(ms));
+        if (distance < bestDistance) {
+            bestDistance = distance;
+            g_marker = marker;
+            g_markerIndex = index;
+        }
+    };
+    inspect(g_cues.start_ms, MarkerStart, -1);
+    inspect(g_cues.end_ms, MarkerEnd, -1);
+    for (size_t i = 0; i < g_cues.marks.size(); ++i)
+        inspect(g_cues.marks[i], MarkerCue, static_cast<int>(i));
+    return g_marker != MarkerNone;
+}
+
+void RemoveMarker() {
+    switch (g_marker) {
+    case MarkerStart: g_cues.start_ms = -1; break;
+    case MarkerEnd: g_cues.end_ms = -1; break;
+    case MarkerCue:
+        if (g_markerIndex >= 0 && static_cast<size_t>(g_markerIndex) < g_cues.marks.size())
+            g_cues.marks.erase(g_cues.marks.begin() + g_markerIndex);
+        break;
+    default: return;
+    }
+    ClearMarker();
+    CommitCues();
+    g_status = L"Repere supprime.";
+    InvalidateRect(g_hwnd, nullptr, FALSE);
+}
+
+bool MoveMarker(int64_t ms) {
+    if (!g_wave) return false;
+    bool valid = false;
+    switch (g_marker) {
+    case MarkerStart: valid = wavecue::set_start(g_cues, ms, PlotDuration()); break;
+    case MarkerEnd: valid = wavecue::set_end(g_cues, ms, PlotDuration()); break;
+    case MarkerCue:
+        if (g_markerIndex >= 0 && static_cast<size_t>(g_markerIndex) < g_cues.marks.size()) {
+            g_cues.marks[static_cast<size_t>(g_markerIndex)] = ms;
+            valid = true;
+        }
+        break;
+    default: break;
+    }
+    return valid;
+}
+
+void ActivateButton(int id) {
+    switch (id) {
+    case BUTTON_LOAD: RequestLoad(); break;
+    case BUTTON_CUE: g_mode = g_mode == ModeAdd ? ModeNone : ModeAdd; break;
+    case BUTTON_START: g_mode = g_mode == ModeStart ? ModeNone : ModeStart; break;
+    case BUTTON_END: g_mode = g_mode == ModeEnd ? ModeNone : ModeEnd; break;
+    case BUTTON_DELETE: RemoveMarker(); break;
+    case BUTTON_AUTO:
+        g_autoApply = !g_autoApply;
+        SaveSettings();
+        g_status = g_autoApply ? L"Limites IN/OUT automatiques activees (titre en lecture uniquement)."
+                               : L"Limites IN/OUT automatiques desactivees.";
+        break;
+    default: break;
+    }
+    InvalidateRect(g_hwnd, nullptr, FALSE);
+}
+
+void ClickPlot(POINT pt) {
+    if (!g_wave || !IsInPlot(pt)) return;
+    const int64_t ms = MsAt(pt.x);
+    bool ok = true;
+    if (g_mode == ModeAdd) {
+        ok = wavecue::add_mark(g_cues, ms, PlotDuration());
+    } else if (g_mode == ModeStart) {
+        ok = wavecue::set_start(g_cues, ms, PlotDuration());
+    } else if (g_mode == ModeEnd) {
+        ok = wavecue::set_end(g_cues, ms, PlotDuration());
+    } else {
+        if (MarkAtX(pt.x)) {
+            g_dragging = true;
+            g_moved = false;
+            g_down = pt;
+            SetCapture(g_hwnd);
+        } else {
+            ClearMarker();
+            SeekPlaying(ms);
+        }
+        InvalidateRect(g_hwnd, nullptr, FALSE);
+        return;
+    }
+    if (ok) {
+        CommitCues();
+        g_status = L"Repere sauvegarde : " + TimeLabel(ms);
+        g_mode = ModeNone;
+    } else g_status = L"Repere invalide ou trop proche d'un autre cue.";
+    InvalidateRect(g_hwnd, nullptr, FALSE);
+}
+
+LRESULT CALLBACK WaveWndProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
+    switch (message) {
+    case WM_CREATE:
+        SetTimer(hwnd, TIMER_POLL, 170, nullptr);
+        return 0;
+    case WM_SIZE:
+        Layout(LOWORD(lparam), HIWORD(lparam));
+        InvalidateRect(hwnd, nullptr, FALSE);
+        return 0;
+    case WM_TIMER:
+        if (wparam == TIMER_POLL) {
+            const std::wstring selectedBefore = g_selectedPath;
+            const auto oldPlayhead = g_playheadMs;
+            SelectPlaylistItem();
+            PollWinamp();
+            if (selectedBefore == g_selectedPath &&
+                (oldPlayhead != g_playheadMs || g_isLoading))
+                InvalidateRect(hwnd, &g_plot, FALSE);
+            return 0;
+        }
+        break;
+    case WM_WAVE_RESULT:
+        AcceptWorkerResult();
+        return 0;
+    case WM_LBUTTONDOWN: {
+        POINT pt{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+        SetFocus(hwnd);
+        int button = ButtonUnder(pt);
+        if (button) ActivateButton(button);
+        else ClickPlot(pt);
+        return 0;
+    }
+    case WM_LBUTTONUP: {
+        POINT pt{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+        if (g_dragging) {
+            if (GetCapture() == hwnd) ReleaseCapture();
+            g_dragging = false;
+            if (g_moved) {
+                if (MoveMarker(MsAt(pt.x))) {
+                    CommitCues();
+                    g_status = L"Repere deplace et sauvegarde.";
+                } else {
+                    g_cues = LoadCues(g_selectedPath);
+                    g_status = L"Limites IN/OUT incompatibles.";
+                }
+            } else if (g_marker != MarkerNone) {
+                int64_t seekTime = -1;
+                if (g_marker == MarkerStart) seekTime = g_cues.start_ms;
+                if (g_marker == MarkerEnd) seekTime = g_cues.end_ms;
+                if (g_marker == MarkerCue && g_markerIndex >= 0 &&
+                    static_cast<size_t>(g_markerIndex) < g_cues.marks.size())
+                    seekTime = g_cues.marks[static_cast<size_t>(g_markerIndex)];
+                if (seekTime >= 0) SeekPlaying(seekTime);
+            }
+            InvalidateRect(hwnd, nullptr, FALSE);
+        }
+        return 0;
+    }
+    case WM_MOUSEMOVE: {
+        POINT pt{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+        int hover = ButtonUnder(pt);
+        if (hover != g_hover) {
+            g_hover = hover;
+            InvalidateRect(hwnd, nullptr, FALSE);
+        }
+        if (g_dragging && (wparam & MK_LBUTTON)) {
+            if (abs(pt.x - g_down.x) > 3) g_moved = true;
+        }
+        return 0;
+    }
+    case WM_KEYDOWN:
+        if (wparam == VK_ESCAPE) {
+            g_mode = ModeNone;
+            ClearMarker();
+            InvalidateRect(hwnd, nullptr, FALSE);
+        } else if (wparam == VK_DELETE) RemoveMarker();
+        return 0;
+    case WM_PAINT:
+        Paint(hwnd);
+        return 0;
+    case WM_ERASEBKGND:
+        return 1;
+    case WM_CLOSE:
+        ShowWindow(hwnd, SW_HIDE);
+        return 0;
+    case WM_DESTROY:
+        KillTimer(hwnd, TIMER_POLL);
+        return 0;
+    default:
+        break;
+    }
+    return DefWindowProcW(hwnd, message, wparam, lparam);
+}
+
+bool MakeStorage() {
+    wchar_t appdata[MAX_PATH]{};
+    if (FAILED(SHGetFolderPathW(nullptr, CSIDL_APPDATA | CSIDL_FLAG_CREATE, nullptr,
+                                SHGFP_TYPE_CURRENT, appdata))) return false;
+    g_dataDir = std::wstring(appdata) + L"\\Winamp_WaveCue";
+    g_cacheDir = g_dataDir + L"\\cache";
+    CreateDirectoryW(g_dataDir.c_str(), nullptr);
+    CreateDirectoryW(g_cacheDir.c_str(), nullptr);
+    return GetFileAttributesW(g_cacheDir.c_str()) != INVALID_FILE_ATTRIBUTES;
+}
+
+} // anonymous namespace
+
+static int PluginInit() {
+    g_winamp = g_plugin.hwndParent;
+    if (!g_winamp || !MakeStorage()) return 1;
+    ReadSettings();
+    WNDCLASSEXW cls{};
+    cls.cbSize = sizeof(cls);
+    cls.lpfnWndProc = WaveWndProc;
+    cls.hInstance = g_plugin.hDllInstance;
+    cls.lpszClassName = L"WinampWaveCueWindow1";
+    cls.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    cls.hbrBackground = nullptr;
+    if (!RegisterClassExW(&cls)) return 1;
+    g_font = CreateFontW(-15, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                         OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                         DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+    g_bigFont = CreateFontW(-22, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                            OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                            DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+    g_hwnd = CreateWindowExW(WS_EX_APPWINDOW, cls.lpszClassName, L"WaveCue - Winamp",
+                              WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, CW_USEDEFAULT, CW_USEDEFAULT,
+                              1030, 620, nullptr, nullptr, g_plugin.hDllInstance, nullptr);
+    if (!g_hwnd) {
+        DeleteObject(g_font);
+        DeleteObject(g_bigFont);
+        g_font = g_bigFont = nullptr;
+        UnregisterClassW(cls.lpszClassName, g_plugin.hDllInstance);
+        return 1;
+    }
+    g_noticeHwnd.store(g_hwnd);
+    try { g_worker = std::thread(WorkerMain); }
+    catch (...) {
+        g_noticeHwnd.store(nullptr);
+        DestroyWindow(g_hwnd);
+        g_hwnd = nullptr;
+        DeleteObject(g_font);
+        DeleteObject(g_bigFont);
+        g_font = g_bigFont = nullptr;
+        UnregisterClassW(cls.lpszClassName, g_plugin.hDllInstance);
+        return 1;
+    }
+    SelectPlaylistItem();
+    PollWinamp();
+    ShowWindow(g_hwnd, SW_SHOW);
+    UpdateWindow(g_hwnd);
+    return 0;
+}
+
+static void PluginConfig() {
+    if (!g_hwnd || !IsWindow(g_hwnd)) return;
+    ShowWindow(g_hwnd, SW_RESTORE);
+    SetForegroundWindow(g_hwnd);
+}
+
+static void PluginQuit() {
+    g_noticeHwnd.store(nullptr);
+    ++g_generation;
+    {
+        std::lock_guard<std::mutex> lk(g_taskMutex);
+        g_workerStop = true;
+        g_pendingTask.reset();
+    }
+    g_taskWake.notify_one();
+    if (g_worker.joinable()) g_worker.join();
+    SaveSettings();
+    if (g_hwnd) DestroyWindow(g_hwnd);
+    g_hwnd = nullptr;
+    if (g_font) DeleteObject(g_font);
+    if (g_bigFont) DeleteObject(g_bigFont);
+    g_font = g_bigFont = nullptr;
+    UnregisterClassW(L"WinampWaveCueWindow1", g_plugin.hDllInstance);
+}
