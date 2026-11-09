@@ -688,6 +688,7 @@ COLORREF ButtonColor(const Button& b) {
     if ((b.id == BUTTON_CUE && g_mode == ModeAdd) ||
         (b.id == BUTTON_START && g_mode == ModeStart) ||
         (b.id == BUTTON_END && g_mode == ModeEnd) ||
+        (b.id == BUTTON_DELETE && g_mode == ModeDelete) ||
         (b.id == BUTTON_DELETE && g_marker == MarkerNone && g_mode == ModeNone && g_hover == BUTTON_DELETE) ||
         (b.id == BUTTON_AUTO && g_autoApply)) return RGB(29, 89, 87);
     return b.id == g_hover ? RGB(52, 70, 84) : PANEL;
@@ -799,7 +800,8 @@ void Paint(HWND hwnd) {
     std::wstring hint = g_mode == ModeAdd ? L"Cliquez sur la waveform pour ajouter un cue (Echap : annuler)."
         : g_mode == ModeStart ? L"Cliquez sur la waveform pour placer IN."
         : g_mode == ModeEnd ? L"Cliquez sur la waveform pour placer OUT."
-        : L"Cue : clic pour sauter (titre en lecture), glisser pour deplacer ; Suppr : effacer le cue selectionne.";
+        : g_mode == ModeDelete ? L"DELETE : cliquez sur un repere pour supprimer SANS deplacer la lecture."
+        : L"Cue = repere de navigation sauvegarde. Clic pour sauter, glisser pour deplacer. Delete puis clic pour effacer.";
     Text(dc, hint, tip, RGB(103, 115, 128), DT_SINGLELINE | DT_END_ELLIPSIS);
     BitBlt(target, 0, 0, w, h, dc, 0, 0, SRCCOPY);
     SelectObject(dc, previousBmp);
@@ -869,7 +871,12 @@ void ActivateButton(int id) {
     case BUTTON_CUE: g_mode = g_mode == ModeAdd ? ModeNone : ModeAdd; break;
     case BUTTON_START: g_mode = g_mode == ModeStart ? ModeNone : ModeStart; break;
     case BUTTON_END: g_mode = g_mode == ModeEnd ? ModeNone : ModeEnd; break;
-    case BUTTON_DELETE: RemoveMarker(); break;
+    case BUTTON_DELETE:
+        g_mode = g_mode == ModeDelete ? ModeNone : ModeDelete;
+        g_status = g_mode == ModeDelete
+            ? L"Mode suppression : cliquez sur une ligne IN, OUT ou CUE."
+            : L"Mode suppression termine.";
+        break;
     case BUTTON_AUTO:
         g_autoApply = !g_autoApply;
         SaveSettings();
@@ -885,6 +892,12 @@ void ClickPlot(POINT pt) {
     if (!g_wave || !IsInPlot(pt)) return;
     const int64_t ms = MsAt(pt.x);
     bool ok = true;
+    if (g_mode == ModeDelete) {
+        if (MarkAtX(pt.x)) RemoveMarker();
+        else g_status = L"Pour supprimer, cliquez sur une ligne coloree.";
+        InvalidateRect(g_hwnd, nullptr, FALSE);
+        return;
+    }
     if (g_mode == ModeAdd) {
         ok = wavecue::add_mark(g_cues, ms, PlotDuration());
     } else if (g_mode == ModeStart) {
@@ -906,7 +919,9 @@ void ClickPlot(POINT pt) {
     }
     if (ok) {
         CommitCues();
-        g_status = L"Repere sauvegarde : " + TimeLabel(ms);
+        g_status = g_mode == ModeAdd
+            ? L"Cue sauvegarde : " + TimeLabel(ms) + L". Cliquez sur sa ligne pour y revenir."
+            : L"Repere sauvegarde : " + TimeLabel(ms);
         g_mode = ModeNone;
     } else g_status = L"Repere invalide ou trop proche d'un autre cue.";
     InvalidateRect(g_hwnd, nullptr, FALSE);
@@ -987,7 +1002,14 @@ LRESULT CALLBACK WaveWndProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
             g_mode = ModeNone;
             ClearMarker();
             InvalidateRect(hwnd, nullptr, FALSE);
-        } else if (wparam == VK_DELETE) RemoveMarker();
+        } else if (wparam == VK_DELETE) {
+            if (g_marker != MarkerNone) RemoveMarker();
+            else {
+                g_mode = ModeDelete;
+                g_status = L"Mode suppression : cliquez sur un repere, sans seek.";
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
+        }
         return 0;
     case WM_PAINT:
         Paint(hwnd);
