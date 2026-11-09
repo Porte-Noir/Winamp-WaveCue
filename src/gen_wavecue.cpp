@@ -573,16 +573,26 @@ void PollWinamp() {
     const std::wstring playPath = playing >= 0 ? PlaylistPath(playing) : L"";
     const int state = static_cast<int>(SendMessageW(g_winamp, WM_WA_IPC, 0, IPC_ISPLAYING));
     const bool active = state == 1 || state == 3;
-    const bool trackChanged = (g_playingIndex != playing || g_playingPath != playPath);
-    if (trackChanged) {
-        g_playingIndex = playing;
+    // The playlist position can change when items are reordered while the SAME
+    // audio file continues playing. A new index is not a new playback event.
+    const bool fileChanged = _wcsicmp(g_playingPath.c_str(), playPath.c_str()) != 0;
+    const int64_t observedMs = active
+        ? static_cast<int64_t>(SendMessageW(g_winamp, WM_WA_IPC, 0, IPC_GETOUTPUTTIME)) : -1;
+    g_playingIndex = playing; // Always keep the current index for Seek.
+    if (fileChanged) {
         g_playingPath = playPath;
         g_playbackCues = LoadCues(playPath);
         g_skipSent = false;
-        if (g_playbackCues.auto_apply && active && g_playbackCues.start_ms > 0)
-            SendMessageW(g_winamp, WM_WA_IPC, static_cast<WPARAM>(g_playbackCues.start_ms), IPC_JUMPTOTIME);
+        // Apply IN only when a genuinely different file starts near its beginning.
+        // This also avoids jumping back when WaveCue opens during an ongoing song,
+        // or when the playlist is reordered at an arbitrary playback position.
+        if (g_playbackCues.auto_apply && state == 1 &&
+            observedMs >= 0 && observedMs <= 2000 &&
+            g_playbackCues.start_ms > 0)
+            SendMessageW(g_winamp, WM_WA_IPC,
+                         static_cast<WPARAM>(g_playbackCues.start_ms), IPC_JUMPTOTIME);
     }
-    g_playheadMs = active ? static_cast<int64_t>(SendMessageW(g_winamp, WM_WA_IPC, 0, IPC_GETOUTPUTTIME)) : -1;
+    g_playheadMs = observedMs;
     if (g_playbackCues.auto_apply && state == 1 && g_playbackCues.end_ms >= 0 && !g_skipSent &&
         g_playheadMs >= g_playbackCues.end_ms) {
         g_skipSent = true;
