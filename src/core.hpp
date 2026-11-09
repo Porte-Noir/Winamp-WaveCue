@@ -10,6 +10,7 @@ namespace wavecue {
 struct Cues {
     int64_t start_ms = -1;
     int64_t end_ms = -1;
+    bool auto_apply = false; // independent Auto IN/OUT setting for this audio file
     std::vector<int64_t> marks;
 };
 
