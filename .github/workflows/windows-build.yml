@@ -8,6 +8,12 @@ jobs:
     runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
+      - name: Fetch pinned dr_flac decoder
+        shell: pwsh
+        run: |
+          $url = "https://raw.githubusercontent.com/mackron/dr_libs/4ffbded724cc3e3d2838eebca70858bf5984385a/dr_flac.h"
+          Invoke-WebRequest -Uri $url -OutFile src/dr_flac.h
+          if ((Get-Item src/dr_flac.h).Length -lt 100000) { throw "Incomplete FLAC decoder download" }
       - name: Configure Win32
         run: cmake -S . -B build -G "Visual Studio 17 2022" -A Win32
       - name: Build Release
