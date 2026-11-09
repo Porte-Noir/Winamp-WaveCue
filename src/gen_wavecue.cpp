@@ -496,6 +496,7 @@ void AcceptWorkerResult() {
     if (!done || done->task.generation != g_generation.load() || done->task.path != g_selectedPath) return;
     g_isLoading = false;
     g_wave = std::move(done->wave);
+    RefreshButtonLayout();
     g_status = g_wave ? L"Waveform prete. Cliquez pour naviguer ou placer un cue."
                       : (done->error.empty() ? L"Impossible d'analyser ce fichier." : done->error);
     InvalidateRect(g_hwnd, nullptr, FALSE);
