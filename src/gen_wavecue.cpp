@@ -502,7 +502,7 @@ int XAt(int64_t ms) {
 
 int64_t MsAt(int x) {
     const int w = std::max(1L, g_plot.right - g_plot.left - 20L);
-    int px = std::clamp(x - g_plot.left - 10, 0, w);
+    int px = std::clamp<int>(x - g_plot.left - 10, 0, w);
     return static_cast<int64_t>(px) * PlotDuration() / w;
 }
 
@@ -668,8 +668,8 @@ void DrawWave(HDC dc) {
         }
         return;
     }
-    int innerW = std::max(1, inner.right - inner.left);
-    int half = std::max(1, (inner.bottom - inner.top) / 2 - 7);
+    int innerW = std::max<int>(1, inner.right - inner.left);
+    int half = std::max<int>(1, (inner.bottom - inner.top) / 2 - 7);
     const size_t n = g_wave->peaks.size();
     // One peak per display pixel. Draw complexity is bounded by window width.
     HPEN pen = CreatePen(PS_SOLID, 1, ACCENT);
@@ -725,7 +725,7 @@ void Paint(HWND hwnd) {
     DrawButtons(dc);
     DrawWave(dc);
     RECT status{28, h - 66, w - 28, h - 42};
-    Text(dc, g_status, MUTED, DT_SINGLELINE | DT_END_ELLIPSIS | DT_VCENTER);
+    Text(dc, g_status, status, MUTED, DT_SINGLELINE | DT_END_ELLIPSIS | DT_VCENTER);
     RECT tip{28, h - 41, w - 28, h - 10};
     std::wstring hint = g_mode == ModeAdd ? L"Cliquez sur la waveform pour ajouter un cue (Echap : annuler)."
         : g_mode == ModeStart ? L"Cliquez sur la waveform pour placer IN."
