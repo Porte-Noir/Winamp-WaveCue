@@ -27,6 +27,8 @@
 #include <utility>
 #include <vector>
 #include "core.hpp"
+#define DR_FLAC_IMPLEMENTATION
+#include "dr_flac.h"
 
 #pragma comment(lib, "mfplat.lib")
 #pragma comment(lib, "mfreadwrite.lib")
@@ -127,7 +129,7 @@ constexpr COLORREF START = RGB(104, 209, 145);
 constexpr COLORREF END = RGB(239, 111, 123);
 
 RECT g_plot = {34, 130, 1040, 435};
-enum Mode { ModeNone, ModeAdd, ModeStart, ModeEnd };
+enum Mode { ModeNone, ModeAdd, ModeStart, ModeEnd, ModeDelete };
 Mode g_mode = ModeNone;
 enum Marker { MarkerNone, MarkerCue, MarkerStart, MarkerEnd };
 Marker g_marker = MarkerNone;
@@ -286,6 +288,48 @@ void SaveCache(const Task& task, const WaveData& wave) {
         DeleteFileW(temp.c_str());
 }
 
+// Native FLAC decoding, independent of Windows codecs; background and cache-aware.
+std::shared_ptr<WaveData> DecodeFlac(const Task& task, std::wstring& error) {
+    drflac* flac = drflac_open_file_w(task.path.c_str(), nullptr);
+    if (!flac) { error = L"Impossible d'ouvrir ce fichier FLAC."; return {}; }
+    const drflac_uint32 channels = flac->channels, rate = flac->sampleRate;
+    if (channels == 0 || channels > 32 || rate == 0) {
+        error = L"En-tete FLAC invalide."; drflac_close(flac); return {};
+    }
+    constexpr drflac_uint64 CHUNK = 4096;
+    std::vector<drflac_int16> samples(static_cast<size_t>(CHUNK) * channels);
+    auto wave = std::make_shared<WaveData>();
+    const uint64_t bucketFrames = std::max<uint32_t>(1, rate / 20);
+    uint64_t frameCount = 0;
+    while (g_generation.load() == task.generation) {
+        drflac_uint64 got = drflac_read_pcm_frames_s16(flac, CHUNK, samples.data());
+        if (got == 0) break;
+        for (drflac_uint64 i = 0; i < got; ++i, ++frameCount) {
+            size_t bin = static_cast<size_t>(frameCount / bucketFrames);
+            if (bin >= 1000000) { error = L"FLAC trop long pour cette version."; break; }
+            if (bin >= wave->peaks.size()) wave->peaks.resize(bin + 1, 0);
+            int maximum = 0;
+            for (drflac_uint32 ch = 0; ch < channels; ++ch) {
+                int sample = static_cast<int>(samples[static_cast<size_t>(i) * channels + ch]);
+                maximum = std::max(maximum, sample < 0 ? -sample : sample);
+            }
+            wave->peaks[bin] = static_cast<uint16_t>(std::max<int>(
+                wave->peaks[bin], std::min(maximum, 32767)));
+        }
+        if (!error.empty()) break;
+        if (flac->totalPCMFrameCount > 0)
+            g_progress.store(static_cast<int>(std::min<uint64_t>(99, frameCount * 100 / flac->totalPCMFrameCount)));
+        Sleep(0);
+    }
+    drflac_close(flac);
+    if (g_generation.load() != task.generation || !error.empty()) return {};
+    if (frameCount == 0 || wave->peaks.empty()) {
+        error = L"FLAC sans echantillons audio."; return {};
+    }
+    wave->duration_ms = std::max<uint64_t>(1, frameCount * 1000 / rate);
+    return wave;
+}
+
 // Strictly sequential 16-bit PCM decode. Peak data uses only ~72 KB per 30 minutes.
 std::shared_ptr<WaveData> DecodeWithMF(const Task& task, std::wstring& error) {
     IMFSourceReader* reader = nullptr;
@@ -397,7 +441,10 @@ void WorkerMain() {
         }
         auto result = std::make_unique<Result>();
         result->task = task;
-        if (mfReady) result->wave = DecodeWithMF(task, result->error);
+        const bool isFlac = task.path.size() >= 5 &&
+            _wcsicmp(task.path.c_str() + task.path.size() - 5, L".flac") == 0;
+        if (isFlac) result->wave = DecodeFlac(task, result->error);
+        else if (mfReady) result->wave = DecodeWithMF(task, result->error);
         else result->error = L"Windows Media Foundation n'est pas disponible.";
         if (task.generation != g_generation.load()) continue;
         if (result->wave) SaveCache(task, *result->wave);
