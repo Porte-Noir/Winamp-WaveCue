@@ -408,6 +408,7 @@ std::shared_ptr<WaveData> DecodeFlac(const Task& task, std::wstring& error) {
     constexpr drflac_uint64 CHUNK = 4096;
     std::vector<drflac_int16> samples(static_cast<size_t>(CHUNK) * channels);
     auto wave = std::make_shared<WaveData>();
+    harmonic::Probe harmonicProbe(static_cast<int>(rate));
     const uint64_t bucketFrames = std::max<uint32_t>(1, rate / 20);
     uint64_t frameCount = 0;
     while (TaskCurrent(task)) {
@@ -424,6 +425,7 @@ std::shared_ptr<WaveData> DecodeFlac(const Task& task, std::wstring& error) {
             }
             wave->peaks[bin] = static_cast<uint16_t>(std::max<int>(
                 wave->peaks[bin], std::min(maximum, 32767)));
+            harmonicProbe.Add(static_cast<float>(samples[static_cast<size_t>(i) * channels]) / 32768.0f);
         }
         if (!error.empty()) break;
         if (flac->totalPCMFrameCount > 0)
@@ -436,6 +438,7 @@ std::shared_ptr<WaveData> DecodeFlac(const Task& task, std::wstring& error) {
         error = L"FLAC sans echantillons audio."; return {};
     }
     wave->duration_ms = std::max<uint64_t>(1, frameCount * 1000 / rate);
+    wave->harmonicKey = harmonicProbe.Estimate();
     return wave;
 }
 
@@ -465,6 +468,7 @@ std::shared_ptr<WaveData> DecodeOgg(const Task& task, std::wstring& error) {
     constexpr int chunkFrames = 4096;
     std::vector<short> samples(static_cast<size_t>(chunkFrames) * channels);
     auto wave = std::make_shared<WaveData>();
+    harmonic::Probe harmonicProbe(rate);
     const uint64_t bucketFrames = std::max<uint32_t>(1, static_cast<uint32_t>(rate) / 20);
     const uint64_t expectedFrames = stb_vorbis_stream_length_in_samples(vorbis);
     uint64_t frames = 0;
@@ -483,6 +487,7 @@ std::shared_ptr<WaveData> DecodeOgg(const Task& task, std::wstring& error) {
             }
             wave->peaks[bin] = static_cast<uint16_t>(
                 std::max<int>(wave->peaks[bin], std::min(peak, 32767)));
+            harmonicProbe.Add(static_cast<float>(samples[static_cast<size_t>(i) * channels]) / 32768.0f);
         }
         if (!error.empty()) break;
         if (expectedFrames > 0 && !task.playing)
@@ -495,6 +500,7 @@ std::shared_ptr<WaveData> DecodeOgg(const Task& task, std::wstring& error) {
         error = L"Aucun echantillon audio Vorbis exploitable."; return {};
     }
     wave->duration_ms = std::max<uint64_t>(1, frames * 1000 / static_cast<uint32_t>(rate));
+    wave->harmonicKey = harmonicProbe.Estimate();
     return wave;
 }
 
@@ -604,6 +610,7 @@ std::shared_ptr<WaveData> DecodeAiff(const Task& task, std::wstring& error) {
     constexpr size_t chunkFrames = 4096;
     std::vector<unsigned char> samples(chunkFrames * static_cast<size_t>(frameBytes));
     auto wave = std::make_shared<WaveData>();
+    harmonic::Probe harmonicProbe(rate);
     uint64_t frames = 0;
     while (TaskCurrent(task) && frames < totalFrames) {
         const size_t count = static_cast<size_t>(
@@ -615,6 +622,7 @@ std::shared_ptr<WaveData> DecodeAiff(const Task& task, std::wstring& error) {
             if (bin >= 1000000) { error = L"AIFF trop long pour cette version."; break; }
             if (bin >= wave->peaks.size()) wave->peaks.resize(bin + 1, 0);
             int peak = 0;
+            float firstChannel = 0;
             for (uint32_t ch = 0; ch < channels; ++ch) {
                 const unsigned char* p = samples.data() +
                     (i * channels + ch) * bytesPerSample;
@@ -633,6 +641,7 @@ std::shared_ptr<WaveData> DecodeAiff(const Task& task, std::wstring& error) {
                         (signedSample * (int64_t(1) << (16 - width)));
                     amplitude = static_cast<int>(std::min<int64_t>(32767,
                         sample16 < 0 ? -sample16 : sample16));
+                    if (!ch) firstChannel = static_cast<float>(sample16 / 32768.0);
                 } else {
                     uint64_t raw = 0;
                     for (uint32_t j = 0; j < bytesPerSample; ++j)
@@ -646,14 +655,17 @@ std::shared_ptr<WaveData> DecodeAiff(const Task& task, std::wstring& error) {
                     } else {
                         memcpy(&sample, &raw, sizeof(sample));
                     }
-                    if (std::isfinite(sample))
+                    if (std::isfinite(sample)) {
                         amplitude = static_cast<int>(std::min(32767.0,
                             std::fabs(sample) * 32767.0));
+                        if (!ch) firstChannel = static_cast<float>(sample);
+                    }
                 }
                 peak = std::max(peak, amplitude);
             }
             wave->peaks[bin] = static_cast<uint16_t>(
                 std::max<int>(wave->peaks[bin], peak));
+            harmonicProbe.Add(firstChannel);
         }
         if (!error.empty()) break;
         if (!task.playing)
@@ -667,6 +679,7 @@ std::shared_ptr<WaveData> DecodeAiff(const Task& task, std::wstring& error) {
         error = L"Lecture des echantillons AIFF impossible."; return {};
     }
     wave->duration_ms = std::max<uint64_t>(1, frames * 1000 / rate);
+    wave->harmonicKey = harmonicProbe.Estimate();
     return wave;
 }
 
@@ -696,6 +709,7 @@ std::shared_ptr<WaveData> DecodeWithMF(const Task& task, std::wstring& error) {
         error = L"Echec Media Foundation (" + stage + L", " + hrCode + L").";
     } else {
         wave = std::make_shared<WaveData>();
+        harmonic::Probe harmonicProbe(static_cast<int>(rate));
         const uint64_t bucketFrames = std::max<UINT32>(1, rate / 20); // ~50 ms
         uint64_t frameCount = 0;
         uint64_t estimatedFrames = 0;
@@ -737,6 +751,7 @@ std::shared_ptr<WaveData> DecodeWithMF(const Task& task, std::wstring& error) {
                             }
                             wave->peaks[bin] = static_cast<uint16_t>(
                                 std::max<int>(wave->peaks[bin], std::min(maximum, 32767)));
+                            harmonicProbe.Add(static_cast<float>(pcm[i * channels]) / 32768.0f);
                         }
                         buffer->Unlock();
                         if (!error.empty()) wave.reset();
@@ -755,8 +770,10 @@ std::shared_ptr<WaveData> DecodeWithMF(const Task& task, std::wstring& error) {
             Sleep(0);
         }
         if (!TaskCurrent(task)) wave.reset();
-        if (wave && frameCount && !wave->peaks.empty())
+        if (wave && frameCount && !wave->peaks.empty()) {
             wave->duration_ms = std::max<uint64_t>(1, frameCount * 1000 / rate);
+            wave->harmonicKey = harmonicProbe.Estimate();
+        }
         else if (wave) { error = L"Aucune donnee audio exploitable."; wave.reset(); }
     }
     if (actual) actual->Release();
