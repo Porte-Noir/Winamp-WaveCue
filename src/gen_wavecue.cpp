@@ -94,6 +94,7 @@ int64_t g_playheadMs = -1;
 Cues g_cues;
 Cues g_playbackCues;
 bool g_skipSent = false;
+bool g_masterAuto = true; // Global safety override, independent of track cues.
 bool g_startPending = false; // Wait until Winamp actually starts the new file.
 bool g_wasStopped = true;
 bool g_isLoading = false;
@@ -153,7 +154,7 @@ std::vector<Button> g_buttons;
 int g_hover = 0;
 constexpr int BUTTON_LOAD = 1, BUTTON_SEEK = 2, BUTTON_START = 3,
               BUTTON_END = 4, BUTTON_DELETE = 5, BUTTON_AUTO = 6,
-              BUTTON_PLAYING_AUTO = 7, BUTTON_PLAYING_LOAD = 8;
+              BUTTON_PLAYING_AUTO = 7, BUTTON_PLAYING_LOAD = 8, BUTTON_MASTER_AUTO = 9;
 
 std::wstring FileLabel(const std::wstring& path) {
     size_t pos = path.find_last_of(L"\\/");
@@ -225,6 +226,22 @@ void SaveCues(const std::wstring& path, const Cues& c) {
         if (!MoveFileExW(temp.c_str(), dest.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
             DeleteFileW(temp.c_str());
     } else DeleteFileW(temp.c_str());
+}
+
+void LoadMasterAuto() {
+    FILE* f = nullptr;
+    if (_wfopen_s(&f, (g_dataDir + L"\\master_auto.txt").c_str(), L"rb") != 0 || !f) return;
+    int enabled = 1;
+    if (fscanf_s(f, "%d", &enabled) == 1)
+        g_masterAuto = enabled != 0;
+    fclose(f);
+}
+
+void SaveMasterAuto() {
+    FILE* f = nullptr;
+    if (_wfopen_s(&f, (g_dataDir + L"\\master_auto.txt").c_str(), L"wb") != 0 || !f) return;
+    fprintf(f, "%d\\n", g_masterAuto ? 1 : 0);
+    fclose(f);
 }
 
 void CommitCues() {
@@ -679,7 +696,7 @@ void PollWinamp() {
         g_startPending = false;
         // Never jump backwards if the plug-in was opened mid-track, or if the
         // current playlist entry merely moved to another position.
-        if (observedMs <= 2000 && g_playbackCues.auto_apply &&
+        if (g_masterAuto && observedMs <= 2000 && g_playbackCues.auto_apply &&
             g_playbackCues.start_ms > 0) {
             SendMessageW(g_winamp, WM_WA_IPC,
                          static_cast<WPARAM>(g_playbackCues.start_ms), IPC_JUMPTOTIME);
@@ -687,7 +704,7 @@ void PollWinamp() {
     }
     g_wasStopped = (state == 0);
     g_playheadMs = observedMs;
-    if (g_playbackCues.auto_apply && state == 1 && g_playbackCues.end_ms >= 0 && !g_skipSent &&
+    if (g_masterAuto && g_playbackCues.auto_apply && state == 1 && g_playbackCues.end_ms >= 0 && !g_skipSent &&
         g_playheadMs >= g_playbackCues.end_ms) {
         g_skipSent = true;
         PostMessageW(g_winamp, WM_COMMAND, WINAMP_BUTTON5, 0);
@@ -774,6 +791,11 @@ void Layout(int width, int height) {
         {BUTTON_AUTO, 139, L"Auto IN/OUT"},
     };
     g_buttons.clear();
+    // Master override: one click suspends all automatic jumps and skips.
+    g_buttons.push_back({BUTTON_MASTER_AUTO,
+        {std::max(left + 260, width - left - 168), 12,
+         std::max(left + 260, width - left - 168) + 168, 43},
+        g_masterAuto ? L"WaveCue Auto ON" : L"WaveCue Auto OFF", true});
     // Independent control for the playing file, placed on its title row.
     const int autoLeft = std::max(left + 320, width - left - 143);
     const int loadLeft = autoLeft - 184;
@@ -796,7 +818,8 @@ void Layout(int width, int height) {
 
 COLORREF ButtonColor(const Button& b) {
     if (!b.enabled) return RGB(29, 34, 43);
-    if ((b.id == BUTTON_SEEK && g_mode == ModeSeek) ||
+    if ((b.id == BUTTON_MASTER_AUTO && g_masterAuto) ||
+        (b.id == BUTTON_SEEK && g_mode == ModeSeek) ||
         (b.id == BUTTON_START && g_mode == ModeStart) ||
         (b.id == BUTTON_END && g_mode == ModeEnd) ||
         (b.id == BUTTON_DELETE && g_mode == ModeDelete) ||
@@ -1013,6 +1036,19 @@ bool MoveMarker(int64_t ms) {
 
 void ActivateButton(int id) {
     switch (id) {
+    case BUTTON_MASTER_AUTO:
+        g_masterAuto = !g_masterAuto;
+        SaveMasterAuto();
+        // Toggling the master switch in mid-song must never rewind or
+        // immediately skip because the playhead passed OUT while disabled.
+        g_startPending = false;
+        g_skipSent = g_masterAuto && g_playbackCues.end_ms >= 0 &&
+                     g_playheadMs >= g_playbackCues.end_ms;
+        g_status = g_masterAuto
+            ? L"Auto IN/OUT global actif. Les reglages des chansons sont conserves."
+            : L"Auto IN/OUT global suspendu. Lecture Winamp normale.";
+        RefreshButtonLayout();
+        break;
     case BUTTON_LOAD: RequestLoad(); break;
     case BUTTON_PLAYING_LOAD: RequestPlayingLoad(); break;
     case BUTTON_SEEK:
@@ -1227,6 +1263,7 @@ bool MakeStorage() {
 static int PluginInit() {
     g_winamp = g_plugin.hwndParent;
     if (!g_winamp || !MakeStorage()) return 1;
+    LoadMasterAuto();
     WNDCLASSEXW cls{};
     cls.cbSize = sizeof(cls);
     cls.lpfnWndProc = WaveWndProc;
