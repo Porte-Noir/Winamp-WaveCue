@@ -649,6 +649,19 @@ void PollWinamp() {
         g_playingPath = playPath;
         g_playbackCues = LoadCues(playPath);
         ResetPlayingWave();
+        // Display a waveform automatically only when it was previously
+        // analysed and is already cached. Never queue a decoder here.
+        if (!playPath.empty()) {
+            if (_wcsicmp(playPath.c_str(), g_selectedPath.c_str()) == 0 && g_wave) {
+                g_playingWave = g_wave;
+            } else {
+                FileStamp stamp{};
+                if (ReadFileStamp(playPath, stamp)) {
+                    Task cacheTask{playPath, stamp, g_playGeneration.load(), true};
+                    g_playingWave = LoadCache(cacheTask);
+                }
+            }
+        }
         if (g_hwnd) {
             RefreshButtonLayout();
             InvalidateRect(g_hwnd, nullptr, FALSE);
