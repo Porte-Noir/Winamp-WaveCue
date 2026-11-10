@@ -980,7 +980,8 @@ void RequestPlayingLoad() {
     if (_wcsicmp(path.c_str(), g_selectedPath.c_str()) == 0 && g_wave) {
         g_playingWave = g_wave;
         InvalidateRect(g_hwnd, &g_playingPlot, FALSE);
-        return;
+        if (g_playingWave->harmonicKey >= -1) return;
+        // An old cached waveform can still need harmonic analysis.
     }
     FileStamp stamp{};
     if (!ReadFileStamp(path, stamp)) return;
@@ -988,7 +989,7 @@ void RequestPlayingLoad() {
     if (auto cached = LoadCache(task)) {
         g_playingWave = std::move(cached);
         InvalidateRect(g_hwnd, &g_playingPlot, FALSE);
-        return;
+        if (g_playingWave->harmonicKey >= -1) return;
     }
     g_playingLoading = true;
     {
