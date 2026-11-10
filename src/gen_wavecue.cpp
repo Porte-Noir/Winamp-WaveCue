@@ -94,6 +94,8 @@ int64_t g_playheadMs = -1;
 Cues g_cues;
 Cues g_playbackCues;
 bool g_skipSent = false;
+bool g_startPending = false; // Wait until Winamp actually starts the new file.
+bool g_wasStopped = true;
 bool g_isLoading = false;
 std::wstring g_status = L"Selectionnez un morceau dans la playlist de Winamp.";
 
@@ -586,15 +588,25 @@ void PollWinamp() {
         g_playingPath = playPath;
         g_playbackCues = LoadCues(playPath);
         g_skipSent = false;
-        // Apply IN only when a genuinely different file starts near its beginning.
-        // This also avoids jumping back when WaveCue opens during an ongoing song,
-        // or when the playlist is reordered at an arbitrary playback position.
-        if (g_playbackCues.auto_apply && state == 1 &&
-            observedMs >= 0 && observedMs <= 2000 &&
-            g_playbackCues.start_ms > 0)
+        // The first notification may arrive before the decoder is ready or while
+        // playback is still stopped/paused. Keep IN pending until it can be applied.
+        g_startPending = !playPath.empty();
+    } else if (g_wasStopped && state == 1 && !playPath.empty()) {
+        // Restarting the same track after Stop is a fresh playback event.
+        g_startPending = true;
+        g_skipSent = false;
+    }
+    if (g_startPending && state == 1 && observedMs >= 0) {
+        g_startPending = false;
+        // Never jump backwards if the plug-in was opened mid-track, or if the
+        // current playlist entry merely moved to another position.
+        if (observedMs <= 2000 && g_playbackCues.auto_apply &&
+            g_playbackCues.start_ms > 0) {
             SendMessageW(g_winamp, WM_WA_IPC,
                          static_cast<WPARAM>(g_playbackCues.start_ms), IPC_JUMPTOTIME);
+        }
     }
+    g_wasStopped = (state == 0);
     g_playheadMs = observedMs;
     if (g_playbackCues.auto_apply && state == 1 && g_playbackCues.end_ms >= 0 && !g_skipSent &&
         g_playheadMs >= g_playbackCues.end_ms) {
