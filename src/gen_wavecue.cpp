@@ -1146,7 +1146,7 @@ void DrawDelaySlider(HDC dc) {
     // Compact 0–60 second slider, adjustable without stopping the stream.
     RECT rail{g_delaySlider.left, 26, g_delaySlider.right, 30};
     RectFill(dc, rail, BORDER);
-    const int width = std::max(1, rail.right - rail.left);
+    const int width = std::max<int>(1, rail.right - rail.left);
     const int x = rail.left + g_streamDelaySeconds * width / 60;
     RECT used{rail.left, rail.top, x, rail.bottom};
     RectFill(dc, used, g_streamDelayEnabled ? RGB(223, 86, 89) : MUTED);
@@ -1166,7 +1166,7 @@ bool InDelaySlider(POINT pt) {
 }
 
 void SetDelayFromX(int x) {
-    const int width = std::max(1L, g_delaySlider.right - g_delaySlider.left);
+    const int width = std::max<int>(1, g_delaySlider.right - g_delaySlider.left);
     const int distance = std::clamp(x - g_delaySlider.left, 0, width);
     g_streamDelaySeconds = std::clamp((distance * 60 + width / 2) / width, 0, 60);
     UpdateDelayedPlayhead();
