@@ -152,7 +152,8 @@ struct Button { int id; RECT bounds; const wchar_t* text; bool enabled; };
 std::vector<Button> g_buttons;
 int g_hover = 0;
 constexpr int BUTTON_LOAD = 1, BUTTON_SEEK = 2, BUTTON_START = 3,
-              BUTTON_END = 4, BUTTON_DELETE = 5, BUTTON_AUTO = 6;
+              BUTTON_END = 4, BUTTON_DELETE = 5, BUTTON_AUTO = 6,
+              BUTTON_PLAYING_AUTO = 7;
 
 std::wstring FileLabel(const std::wstring& path) {
     size_t pos = path.find_last_of(L"\\/");
@@ -640,7 +641,10 @@ void PollWinamp() {
         g_playingPath = playPath;
         g_playbackCues = LoadCues(playPath);
         LoadPlayingWave(playPath);
-        if (g_hwnd) InvalidateRect(g_hwnd, nullptr, FALSE);
+        if (g_hwnd) {
+            RefreshButtonLayout();
+            InvalidateRect(g_hwnd, nullptr, FALSE);
+        }
         g_skipSent = false;
         // The first notification may arrive before the decoder is ready or while
         // playback is still stopped/paused. Keep IN pending until it can be applied.
@@ -738,7 +742,7 @@ int ButtonUnder(POINT pt) {
 }
 
 void Layout(int width, int height) {
-    const int left = 28, top = 270, btnHeight = 34, gap = 8;
+    const int left = 28, top = 294, btnHeight = 34, gap = 8;
     g_playingPlot = {left, 83, std::max(left + 120, width - left), 215};
     const struct { int id, w; const wchar_t* label; } specs[] = {
         {BUTTON_LOAD, 185, L"Show/Load Waveform"},
@@ -749,6 +753,11 @@ void Layout(int width, int height) {
         {BUTTON_AUTO, 139, L"Auto IN/OUT"},
     };
     g_buttons.clear();
+    // Independent control for the playing file, placed on its title row.
+    g_buttons.push_back({BUTTON_PLAYING_AUTO,
+        {std::max(left + 300, width - left - 143), 49,
+         std::max(left + 300, width - left - 143) + 143, 79},
+        L"Auto IN/OUT", !g_playingPath.empty() && g_playingIndex >= 0});
     int x = left, y = top;
     for (auto& b : specs) {
         if (x != left && x + b.w > width - left) { x = left; y += btnHeight + gap; }
@@ -767,7 +776,8 @@ COLORREF ButtonColor(const Button& b) {
         (b.id == BUTTON_END && g_mode == ModeEnd) ||
         (b.id == BUTTON_DELETE && g_mode == ModeDelete) ||
         (b.id == BUTTON_DELETE && g_marker == MarkerNone && g_mode == ModeNone && g_hover == BUTTON_DELETE) ||
-        (b.id == BUTTON_AUTO && g_cues.auto_apply)) return RGB(29, 89, 87);
+        (b.id == BUTTON_AUTO && g_cues.auto_apply) ||
+        (b.id == BUTTON_PLAYING_AUTO && g_playbackCues.auto_apply)) return RGB(29, 89, 87);
     return b.id == g_hover ? RGB(52, 70, 84) : PANEL;
 }
 
@@ -894,13 +904,13 @@ void Paint(HWND hwnd) {
     Text(dc, L"WAVECUE", title, TEXT, DT_SINGLELINE | DT_LEFT | DT_VCENTER, g_bigFont);
     RECT playingLabel{28, 49, w - 28, 80};
     Text(dc, L"ACTUALLY PLAYING", playingLabel, MUTED, DT_SINGLELINE | DT_VCENTER);
-    RECT playingFile{195, 49, w - 28, 80};
+    RECT playingFile{195, 49, std::max(215, w - 185), 80};
     Text(dc, g_playingPath.empty() ? L"Aucune lecture" : FileLabel(g_playingPath),
          playingFile, ACCENT, DT_SINGLELINE | DT_END_ELLIPSIS | DT_VCENTER);
     DrawPlayingWave(dc);
-    RECT selectedLabel{28, 229, w - 28, 259};
+    RECT selectedLabel{28, 255, w - 28, 285};
     Text(dc, L"SELECTED TRACK", selectedLabel, MUTED, DT_SINGLELINE | DT_VCENTER);
-    RECT selectedFile{195, 229, w - 28, 259};
+    RECT selectedFile{195, 255, w - 28, 285};
     Text(dc, g_selectedPath.empty() ? L"Aucun morceau selectionne" : FileLabel(g_selectedPath),
          selectedFile, ACCENT, DT_SINGLELINE | DT_END_ELLIPSIS | DT_VCENTER);
     DrawButtons(dc);
@@ -992,6 +1002,24 @@ void ActivateButton(int id) {
         g_status = g_mode == ModeDelete
             ? L"Mode suppression : cliquez sur une ligne IN, OUT ou CUE."
             : L"Mode suppression termine.";
+        break;
+    case BUTTON_PLAYING_AUTO:
+        if (!g_playingPath.empty() && g_playingIndex >= 0) {
+            g_playbackCues.auto_apply = !g_playbackCues.auto_apply;
+            SaveCues(g_playingPath, g_playbackCues);
+            // Selected-track editor and playing panel must show the same
+            // persisted setting when they refer to the same audio file.
+            if (_wcsicmp(g_selectedPath.c_str(), g_playingPath.c_str()) == 0)
+                g_cues.auto_apply = g_playbackCues.auto_apply;
+            // Enabling Auto mid-track must not instantly skip an already
+            // passed OUT boundary; do not rewind to IN either.
+            if (g_playbackCues.auto_apply)
+                g_skipSent = g_playbackCues.end_ms >= 0 &&
+                             g_playheadMs >= g_playbackCues.end_ms;
+            g_status = g_playbackCues.auto_apply
+                ? L"Auto IN/OUT actif pour le morceau en lecture."
+                : L"Auto IN/OUT desactive pour le morceau en lecture.";
+        }
         break;
     case BUTTON_AUTO:
         if (!g_selectedPath.empty()) {
