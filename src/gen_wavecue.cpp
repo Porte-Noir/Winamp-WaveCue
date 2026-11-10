@@ -331,7 +331,7 @@ int ReadKeyCache(const Task& task) {
     int key = -2, version = 0;
     const int got = fscanf_s(f, "%d %llu %llu %d", &version, &size, &stamp, &key);
     fclose(f);
-    if (got != 4 || version != 2 || size != task.stamp.size ||
+    if (got != 4 || version != 3 || size != task.stamp.size ||
         stamp != task.stamp.modified || key < -1 || key >= 24) return -2;
     return key;
 }
@@ -343,7 +343,7 @@ void WriteKeyCache(const Task& task, int key) {
     const auto temp = dest + L".tmp";
     FILE* f = nullptr;
     if (_wfopen_s(&f, temp.c_str(), L"wb") != 0 || !f) return;
-    fprintf(f, "2 %llu %llu %d\n",
+    fprintf(f, "3 %llu %llu %d\n",
         static_cast<unsigned long long>(stamp.size),
         static_cast<unsigned long long>(stamp.modified), key);
     if (fclose(f) == 0) {
@@ -419,13 +419,15 @@ std::shared_ptr<WaveData> DecodeFlac(const Task& task, std::wstring& error) {
             if (bin >= 1000000) { error = L"FLAC trop long pour cette version."; break; }
             if (bin >= wave->peaks.size()) wave->peaks.resize(bin + 1, 0);
             int maximum = 0;
+            double mixed = 0;
             for (drflac_uint32 ch = 0; ch < channels; ++ch) {
                 int sample = static_cast<int>(samples[static_cast<size_t>(i) * channels + ch]);
                 maximum = std::max(maximum, sample < 0 ? -sample : sample);
+                mixed += static_cast<double>(sample);
             }
             wave->peaks[bin] = static_cast<uint16_t>(std::max<int>(
                 wave->peaks[bin], std::min(maximum, 32767)));
-            harmonicProbe.Add(static_cast<float>(samples[static_cast<size_t>(i) * channels]) / 32768.0f);
+            harmonicProbe.Add(static_cast<float>(mixed / (32768.0 * channels)));
         }
         if (!error.empty()) break;
         if (flac->totalPCMFrameCount > 0)
@@ -481,13 +483,15 @@ std::shared_ptr<WaveData> DecodeOgg(const Task& task, std::wstring& error) {
             if (bin >= 1000000) { error = L"OGG trop long pour cette version."; break; }
             if (bin >= wave->peaks.size()) wave->peaks.resize(bin + 1, 0);
             int peak = 0;
+            double mixed = 0;
             for (int ch = 0; ch < channels; ++ch) {
                 const int sample = samples[static_cast<size_t>(i) * channels + ch];
                 peak = std::max(peak, sample < 0 ? -sample : sample);
+                mixed += static_cast<double>(sample);
             }
             wave->peaks[bin] = static_cast<uint16_t>(
                 std::max<int>(wave->peaks[bin], std::min(peak, 32767)));
-            harmonicProbe.Add(static_cast<float>(samples[static_cast<size_t>(i) * channels]) / 32768.0f);
+            harmonicProbe.Add(static_cast<float>(mixed / (32768.0 * channels)));
         }
         if (!error.empty()) break;
         if (expectedFrames > 0 && !task.playing)
@@ -622,7 +626,7 @@ std::shared_ptr<WaveData> DecodeAiff(const Task& task, std::wstring& error) {
             if (bin >= 1000000) { error = L"AIFF trop long pour cette version."; break; }
             if (bin >= wave->peaks.size()) wave->peaks.resize(bin + 1, 0);
             int peak = 0;
-            float firstChannel = 0;
+            double mixed = 0;
             for (uint32_t ch = 0; ch < channels; ++ch) {
                 const unsigned char* p = samples.data() +
                     (i * channels + ch) * bytesPerSample;
@@ -641,7 +645,7 @@ std::shared_ptr<WaveData> DecodeAiff(const Task& task, std::wstring& error) {
                         (signedSample * (int64_t(1) << (16 - width)));
                     amplitude = static_cast<int>(std::min<int64_t>(32767,
                         sample16 < 0 ? -sample16 : sample16));
-                    if (!ch) firstChannel = static_cast<float>(sample16 / 32768.0);
+                    mixed += static_cast<double>(sample16) / 32768.0;
                 } else {
                     uint64_t raw = 0;
                     for (uint32_t j = 0; j < bytesPerSample; ++j)
@@ -658,14 +662,14 @@ std::shared_ptr<WaveData> DecodeAiff(const Task& task, std::wstring& error) {
                     if (std::isfinite(sample)) {
                         amplitude = static_cast<int>(std::min(32767.0,
                             std::fabs(sample) * 32767.0));
-                        if (!ch) firstChannel = static_cast<float>(sample);
+                        mixed += sample;
                     }
                 }
                 peak = std::max(peak, amplitude);
             }
             wave->peaks[bin] = static_cast<uint16_t>(
                 std::max<int>(wave->peaks[bin], peak));
-            harmonicProbe.Add(firstChannel);
+            harmonicProbe.Add(static_cast<float>(mixed / channels));
         }
         if (!error.empty()) break;
         if (!task.playing)
@@ -745,13 +749,15 @@ std::shared_ptr<WaveData> DecodeWithMF(const Task& task, std::wstring& error) {
                             if (bin >= 1000000) { error = L"Morceau trop long pour cette version."; break; }
                             if (bin >= wave->peaks.size()) wave->peaks.resize(bin + 1, 0);
                             int maximum = 0;
+                            double mixed = 0;
                             for (UINT32 ch = 0; ch < channels; ++ch) {
-                                const int s = static_cast<int>(pcm[i * channels + ch]);
-                                maximum = std::max(maximum, s < 0 ? -s : s);
+                                const int sample = static_cast<int>(pcm[i * channels + ch]);
+                                maximum = std::max(maximum, sample < 0 ? -sample : sample);
+                                mixed += static_cast<double>(sample);
                             }
                             wave->peaks[bin] = static_cast<uint16_t>(
                                 std::max<int>(wave->peaks[bin], std::min(maximum, 32767)));
-                            harmonicProbe.Add(static_cast<float>(pcm[i * channels]) / 32768.0f);
+                            harmonicProbe.Add(static_cast<float>(mixed / (32768.0 * channels)));
                         }
                         buffer->Unlock();
                         if (!error.empty()) wave.reset();
