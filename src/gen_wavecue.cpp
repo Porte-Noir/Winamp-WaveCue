@@ -51,6 +51,8 @@
 #define WINAMP_BUTTON5 40048
 #define WM_WAVE_RESULT (WM_APP + 24)
 #define TIMER_POLL 11
+#define IPC_CB_MISC 603
+#define IPC_CB_MISC_STATUS 2
 
 struct winampGeneralPurposePlugin {
     int version;
@@ -79,6 +81,7 @@ using wavecue::Cues;
 HWND g_hwnd = nullptr;
 std::atomic<HWND> g_noticeHwnd{nullptr};
 HWND g_winamp = nullptr;
+bool g_winampSubclassInstalled = false;
 HFONT g_font = nullptr;
 HFONT g_bigFont = nullptr;
 std::wstring g_dataDir;
@@ -601,6 +604,17 @@ void PollWinamp() {
     if (!active) g_skipSent = false;
 }
 
+// Winamp sends playback-status notifications immediately rather than waiting
+// for our 170 ms display timer. Keep timer polling as a fallback.
+LRESULT CALLBACK WinampEventProc(HWND hwnd, UINT message, WPARAM wp, LPARAM lp,
+                                  UINT_PTR subclassId, DWORD_PTR refData) {
+    const bool playbackEvent = message == WM_WA_IPC &&
+        lp == IPC_CB_MISC && wp == IPC_CB_MISC_STATUS;
+    LRESULT result = DefSubclassProc(hwnd, message, wp, lp);
+    if (playbackEvent && g_hwnd && IsWindow(g_hwnd)) PollWinamp();
+    return result;
+}
+
 void SelectPlaylistItem() {
     if (!g_winamp || !IsWindow(g_winamp)) return;
     int idx = static_cast<int>(SendMessageW(g_winamp, WM_WA_IPC,
@@ -1092,6 +1106,9 @@ static int PluginInit() {
         UnregisterClassW(cls.lpszClassName, g_plugin.hDllInstance);
         return 1;
     }
+    // Hook the official 5.x playback-status notification on the same UI thread.
+    // This removes up to 170 ms of polling latency at the beginning of a song.
+    g_winampSubclassInstalled = SetWindowSubclass(g_winamp, WinampEventProc, 1, 0) != FALSE;
     SelectPlaylistItem();
     PollWinamp();
     ShowWindow(g_hwnd, SW_SHOW);
@@ -1106,6 +1123,10 @@ static void PluginConfig() {
 }
 
 static void PluginQuit() {
+    if (g_winampSubclassInstalled && g_winamp && IsWindow(g_winamp)) {
+        RemoveWindowSubclass(g_winamp, WinampEventProc, 1);
+        g_winampSubclassInstalled = false;
+    }
     g_noticeHwnd.store(nullptr);
     ++g_generation;
     {
