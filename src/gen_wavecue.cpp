@@ -559,7 +559,7 @@ void AcceptWorkerResult() {
         std::lock_guard<std::mutex> lk(g_taskMutex);
         done = std::move(g_completed);
     }
-    if (!done || done->!TaskCurrent(task) || done->task.path != g_selectedPath) return;
+    if (!done || !TaskCurrent(done->task) || done->task.path != g_selectedPath) return;
     g_isLoading = false;
     g_wave = std::move(done->wave);
     if (_wcsicmp(g_selectedPath.c_str(), g_playingPath.c_str()) == 0 && g_wave)
