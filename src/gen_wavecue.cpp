@@ -28,6 +28,7 @@
 #include <utility>
 #include <vector>
 #include "core.hpp"
+#include "harmonic_probe.hpp"
 #define DR_FLAC_IMPLEMENTATION
 #include "dr_flac.h"
 // Ogg Vorbis, decoded in the background without changing Winamp playback.
@@ -119,6 +120,7 @@ std::wstring g_status = L"Selectionnez un morceau dans la playlist de Winamp.";
 struct WaveData {
     uint64_t duration_ms = 0;
     std::vector<uint16_t> peaks;
+    int harmonicKey = -2; // -2 unknown; -1 uncertain; 0..23 pitch class + mode
 };
 std::shared_ptr<WaveData> g_wave;
 std::shared_ptr<WaveData> g_playingWave;
@@ -321,6 +323,35 @@ struct CacheHeader {
 static_assert(sizeof(CacheHeader) == 40, "Cache header must be stable");
 constexpr uint32_t CACHE_MAGIC = 0x45554357u;
 
+std::wstring KeyCachePath(const std::wstring& path) { return CachePath(path) + L".key"; }
+int ReadKeyCache(const Task& task) {
+    FILE* f = nullptr;
+    if (_wfopen_s(&f, KeyCachePath(task.path).c_str(), L"rb") != 0 || !f) return -2;
+    unsigned long long size = 0, stamp = 0;
+    int key = -2, version = 0;
+    const int got = fscanf_s(f, "%d %llu %llu %d", &version, &size, &stamp, &key);
+    fclose(f);
+    if (got != 4 || version != 1 || size != task.stamp.size ||
+        stamp != task.stamp.modified || key < -1 || key >= 24) return -2;
+    return key;
+}
+void WriteKeyCache(const Task& task, int key) {
+    FileStamp stamp{};
+    if (!ReadFileStamp(task.path, stamp) || stamp.size != task.stamp.size ||
+        stamp.modified != task.stamp.modified) return;
+    const auto dest = KeyCachePath(task.path);
+    const auto temp = dest + L".tmp";
+    FILE* f = nullptr;
+    if (_wfopen_s(&f, temp.c_str(), L"wb") != 0 || !f) return;
+    fprintf(f, "1 %llu %llu %d\n",
+        static_cast<unsigned long long>(stamp.size),
+        static_cast<unsigned long long>(stamp.modified), key);
+    if (fclose(f) == 0) {
+        if (!MoveFileExW(temp.c_str(), dest.c_str(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) DeleteFileW(temp.c_str());
+    } else DeleteFileW(temp.c_str());
+}
+
 bool TaskCurrent(const Task& task) {
     return task.generation == (task.playing ? g_playGeneration.load() : g_generation.load());
 }
@@ -344,6 +375,7 @@ std::shared_ptr<WaveData> LoadCache(const Task& task) {
         return {};
     }
     fclose(f);
+    wave->harmonicKey = ReadKeyCache(task);
     return wave;
 }
 
@@ -362,6 +394,7 @@ void SaveCache(const Task& task, const WaveData& wave) {
     if (fclose(f) != 0) ok = false;
     if (!ok || !MoveFileExW(temp.c_str(), dest.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
         DeleteFileW(temp.c_str());
+    else if (wave.harmonicKey >= -1) WriteKeyCache(task, wave.harmonicKey);
 }
 
 // Native FLAC decoding, independent of Windows codecs; background and cache-aware.
@@ -834,17 +867,21 @@ void RequestLoad() {
     }
     Task task{g_selectedPath, stamp, ++g_generation};
     if (auto cached = LoadCache(task)) {
+        const bool keyReady = cached->harmonicKey >= -1;
         g_wave = std::move(cached);
-        g_isLoading = false;
-        g_status = L"Waveform chargee depuis le cache.";
-        RefreshButtonLayout();
-        InvalidateRect(g_hwnd, nullptr, FALSE);
-        return;
-    }
-    g_wave.reset();
+        if (keyReady) {
+            g_isLoading = false;
+            g_status = L"Waveform et tonalite lues depuis le cache.";
+            RefreshButtonLayout();
+            InvalidateRect(g_hwnd, nullptr, FALSE);
+            return;
+        }
+        // Existing waveform remains visible while user-requested analysis runs.
+        g_status = L"Waveform en cache. Detection harmonique experimentale...";
+    } else g_wave.reset();
     g_progress = 0;
     g_isLoading = true;
-    g_status = L"Analyse audio en cours...";
+    if (!g_wave) g_status = L"Analyse audio et detection harmonique en cours...";
     {
         std::lock_guard<std::mutex> lk(g_taskMutex);
         g_pendingTask = std::make_unique<Task>(std::move(task));
@@ -874,7 +911,7 @@ void AcceptWorkerResult() {
     g_isLoading = false;
     g_wave = std::move(done->wave);
     RefreshButtonLayout();
-    g_status = g_wave ? L"Waveform prete. Cliquez pour naviguer ou placer un cue."
+    g_status = g_wave ? L"Waveform prete. Tonalite experimentale : " + std::wstring(harmonic::Camelot(g_wave->harmonicKey))
                       : (done->error.empty() ? L"Impossible d'analyser ce fichier." : done->error);
     InvalidateRect(g_hwnd, nullptr, FALSE);
 }
@@ -1236,6 +1273,12 @@ void DrawWave(HDC dc) {
     SelectObject(dc, previous);
     DeleteObject(pen);
 
+    if (g_wave->harmonicKey >= 0) {
+        RECT keyRect{g_plot.right - 85, g_plot.top + 8, g_plot.right - 10, g_plot.top + 39};
+        RectFill(dc, keyRect, RGB(39, 54, 72));
+        Text(dc, harmonic::Camelot(g_wave->harmonicKey), keyRect, RGB(255, 209, 108),
+             DT_CENTER | DT_VCENTER | DT_SINGLELINE, g_bigFont);
+    }
     if (g_cues.start_ms >= 0)
         DrawMarker(dc, g_cues.start_ms, START, L"IN");
     if (g_cues.end_ms >= 0)
