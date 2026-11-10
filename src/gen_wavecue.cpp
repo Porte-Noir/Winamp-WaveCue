@@ -16,6 +16,7 @@
 #include <atomic>
 #include <cmath>
 #include <condition_variable>
+#include <deque>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -97,6 +98,19 @@ Cues g_cues;
 Cues g_playbackCues;
 bool g_skipSent = false;
 bool g_masterAuto = true; // Global safety override, independent of track cues.
+bool g_streamDelayEnabled = false;
+int g_streamDelaySeconds = 10;
+bool g_delayDragging = false;
+RECT g_delaySlider = {327, 19, 700, 37};
+// Store only positions/timestamps, never audio. Covers at least 60 seconds.
+struct PlaybackSample {
+    ULONGLONG tick;
+    std::wstring path;
+    int64_t position;
+};
+std::deque<PlaybackSample> g_recentPlayback;
+int64_t g_delayedPlayhead = -1;
+bool g_delayedOnPreviousTrack = false;
 bool g_startPending = false; // Wait until Winamp actually starts the new file.
 bool g_wasStopped = true;
 bool g_isLoading = false;
@@ -156,7 +170,8 @@ std::vector<Button> g_buttons;
 int g_hover = 0;
 constexpr int BUTTON_LOAD = 1, BUTTON_SEEK = 2, BUTTON_START = 3,
               BUTTON_END = 4, BUTTON_DELETE = 5, BUTTON_AUTO = 6,
-              BUTTON_PLAYING_AUTO = 7, BUTTON_PLAYING_LOAD = 8, BUTTON_MASTER_AUTO = 9;
+              BUTTON_PLAYING_AUTO = 7, BUTTON_PLAYING_LOAD = 8, BUTTON_MASTER_AUTO = 9,
+              BUTTON_STREAM_DELAY = 10;
 
 std::wstring FileLabel(const std::wstring& path) {
     size_t pos = path.find_last_of(L"\\/");
@@ -244,6 +259,46 @@ void SaveMasterAuto() {
     if (_wfopen_s(&f, (g_dataDir + L"\\master_auto.txt").c_str(), L"wb") != 0 || !f) return;
     fprintf(f, "%d\n", g_masterAuto ? 1 : 0);
     fclose(f);
+}
+
+void LoadStreamDelay() {
+    FILE* f = nullptr;
+    if (_wfopen_s(&f, (g_dataDir + L"\\stream_delay.txt").c_str(), L"rb") != 0 || !f) return;
+    int enabled = 0, seconds = 10;
+    if (fscanf_s(f, "%d %d", &enabled, &seconds) == 2) {
+        g_streamDelayEnabled = enabled != 0;
+        g_streamDelaySeconds = std::clamp(seconds, 0, 60);
+    }
+    fclose(f);
+}
+
+void SaveStreamDelay() {
+    FILE* f = nullptr;
+    if (_wfopen_s(&f, (g_dataDir + L"\\stream_delay.txt").c_str(), L"wb") != 0 || !f) return;
+    fprintf(f, "%d %d\n", g_streamDelayEnabled ? 1 : 0, g_streamDelaySeconds);
+    fclose(f);
+}
+
+void UpdateDelayedPlayhead() {
+    g_delayedPlayhead = -1;
+    g_delayedOnPreviousTrack = false;
+    if (!g_streamDelayEnabled || g_playingPath.empty() || g_playheadMs < 0)
+        return;
+    if (!g_streamDelaySeconds) {
+        g_delayedPlayhead = g_playheadMs;
+        return;
+    }
+    const ULONGLONG now = GetTickCount64();
+    const ULONGLONG target = now > static_cast<ULONGLONG>(g_streamDelaySeconds) * 1000
+        ? now - static_cast<ULONGLONG>(g_streamDelaySeconds) * 1000 : 0;
+    for (auto it = g_recentPlayback.rbegin(); it != g_recentPlayback.rend(); ++it) {
+        if (it->tick > target) continue;
+        if (_wcsicmp(it->path.c_str(), g_playingPath.c_str()) == 0)
+            g_delayedPlayhead = it->position;
+        else
+            g_delayedOnPreviousTrack = true;
+        break;
+    }
 }
 
 void CommitCues() {
@@ -944,6 +999,15 @@ void PollWinamp() {
     }
     g_wasStopped = (state == 0);
     g_playheadMs = observedMs;
+    // Bounded wall-clock history; supports live delay changes, pauses, seeks
+    // and boundaries between different playlist tracks.
+    const ULONGLONG stamp = GetTickCount64();
+    if (active && observedMs >= 0 && !playPath.empty() &&
+        (g_recentPlayback.empty() || stamp - g_recentPlayback.back().tick >= 70))
+        g_recentPlayback.push_back({stamp, playPath, observedMs});
+    while (!g_recentPlayback.empty() && stamp - g_recentPlayback.front().tick > 65000)
+        g_recentPlayback.pop_front();
+    UpdateDelayedPlayhead();
     if (g_masterAuto && g_playbackCues.auto_apply && state == 1 && g_playbackCues.end_ms >= 0 && !g_skipSent &&
         g_playheadMs >= g_playbackCues.end_ms) {
         g_skipSent = true;
@@ -1031,6 +1095,14 @@ void Layout(int width, int height) {
         {BUTTON_AUTO, 139, L"Auto IN/OUT"},
     };
     g_buttons.clear();
+    // Live stream monitor: visual indicator only, no audio processing.
+    const int masterLeft = std::max(left + 260, width - left - 168);
+    const int delayLeft = left + 166;
+    g_delaySlider = {delayLeft + 146, 19,
+        std::max(delayLeft + 186, masterLeft - 87), 37};
+    g_buttons.push_back({BUTTON_STREAM_DELAY,
+        {delayLeft, 12, delayLeft + 137, 43},
+        g_streamDelayEnabled ? L"Stream Delay ON" : L"Stream Delay OFF", true});
     // Master override: one click suspends all automatic jumps and skips.
     g_buttons.push_back({BUTTON_MASTER_AUTO,
         {std::max(left + 260, width - left - 168), 12,
@@ -1059,6 +1131,7 @@ void Layout(int width, int height) {
 COLORREF ButtonColor(const Button& b) {
     if (!b.enabled) return RGB(29, 34, 43);
     if ((b.id == BUTTON_MASTER_AUTO && g_masterAuto) ||
+        (b.id == BUTTON_STREAM_DELAY && g_streamDelayEnabled) ||
         (b.id == BUTTON_SEEK && g_mode == ModeSeek) ||
         (b.id == BUTTON_START && g_mode == ModeStart) ||
         (b.id == BUTTON_END && g_mode == ModeEnd) ||
@@ -1067,6 +1140,37 @@ COLORREF ButtonColor(const Button& b) {
         (b.id == BUTTON_AUTO && g_cues.auto_apply) ||
         (b.id == BUTTON_PLAYING_AUTO && g_playbackCues.auto_apply)) return RGB(29, 89, 87);
     return b.id == g_hover ? RGB(52, 70, 84) : PANEL;
+}
+
+void DrawDelaySlider(HDC dc) {
+    // Compact 0–60 second slider, adjustable without stopping the stream.
+    RECT rail{g_delaySlider.left, 26, g_delaySlider.right, 30};
+    RectFill(dc, rail, BORDER);
+    const int width = std::max(1, rail.right - rail.left);
+    const int x = rail.left + g_streamDelaySeconds * width / 60;
+    RECT used{rail.left, rail.top, x, rail.bottom};
+    RectFill(dc, used, g_streamDelayEnabled ? RGB(223, 86, 89) : MUTED);
+    RECT thumb{x - 4, 19, x + 5, 37};
+    RectFill(dc, thumb, g_streamDelayEnabled ? RGB(233, 100, 105) : TEXT);
+    RECT readout{g_delaySlider.right + 9, 13, g_delaySlider.right + 78, 44};
+    Text(dc, std::to_wstring(g_streamDelaySeconds) + L" s", readout,
+         g_streamDelayEnabled ? RGB(233, 100, 105) : MUTED,
+         DT_SINGLELINE | DT_VCENTER);
+}
+
+bool InDelaySlider(POINT pt) {
+    RECT rect = g_delaySlider;
+    rect.top = 10;
+    rect.bottom = 46;
+    return PtInRect(&rect, pt) != 0;
+}
+
+void SetDelayFromX(int x) {
+    const int width = std::max(1L, g_delaySlider.right - g_delaySlider.left);
+    const int distance = std::clamp(x - g_delaySlider.left, 0, width);
+    g_streamDelaySeconds = std::clamp((distance * 60 + width / 2) / width, 0, 60);
+    UpdateDelayedPlayhead();
+    InvalidateRect(g_hwnd, nullptr, FALSE);
 }
 
 void DrawButtons(HDC dc) {
@@ -1166,6 +1270,24 @@ void DrawPlayingWave(HDC dc) {
     g_selectedPath = g_playingPath;
     g_isLoading = false;
     DrawWave(dc);
+    if (g_streamDelayEnabled) {
+        if (g_delayedPlayhead >= 0 && g_wave && g_wave->duration_ms > 0) {
+            const int width = std::max(1L, g_plot.right - g_plot.left - 20L);
+            const int x = g_plot.left + 10 + static_cast<int>(
+                wavecue::clamp_ms(g_delayedPlayhead,
+                    static_cast<int64_t>(g_wave->duration_ms)) * width /
+                    static_cast<int64_t>(g_wave->duration_ms));
+            Line(dc, x, g_plot.top + 1, x, g_plot.bottom - 1,
+                 RGB(242, 79, 91), 2);
+            RECT label{x + 5, g_plot.bottom - 26, x + 90, g_plot.bottom - 3};
+            Text(dc, L"STREAM", label, RGB(242, 79, 91), DT_SINGLELINE);
+        } else if (g_delayedOnPreviousTrack) {
+            RECT msg{g_plot.left + 14, g_plot.top + 9,
+                     g_plot.right - 10, g_plot.top + 34};
+            Text(dc, L"STREAM : morceau precedent", msg, RGB(242, 79, 91),
+                 DT_RIGHT | DT_SINGLELINE);
+        }
+    }
     if (!g_wave && g_playingLoading) {
         RECT msg = g_playingPlot;
         Text(dc, L"ANALYSE DU MORCEAU EN LECTURE...", msg, ACCENT,
@@ -1202,6 +1324,7 @@ void Paint(HWND hwnd) {
     Text(dc, g_selectedPath.empty() ? L"Aucun morceau selectionne" : FileLabel(g_selectedPath),
          selectedFile, ACCENT, DT_SINGLELINE | DT_END_ELLIPSIS | DT_VCENTER);
     DrawButtons(dc);
+    DrawDelaySlider(dc);
     DrawWave(dc);
     RECT status{28, h - 66, w - 28, h - 42};
     Text(dc, g_status, status, MUTED, DT_SINGLELINE | DT_END_ELLIPSIS | DT_VCENTER);
@@ -1276,6 +1399,15 @@ bool MoveMarker(int64_t ms) {
 
 void ActivateButton(int id) {
     switch (id) {
+    case BUTTON_STREAM_DELAY:
+        g_streamDelayEnabled = !g_streamDelayEnabled;
+        UpdateDelayedPlayhead();
+        SaveStreamDelay();
+        RefreshButtonLayout();
+        g_status = g_streamDelayEnabled
+            ? L"Indicateur Twitch actif : delai visuel estime, sans traitement audio."
+            : L"Indicateur Twitch desactive.";
+        break;
     case BUTTON_MASTER_AUTO:
         g_masterAuto = !g_masterAuto;
         SaveMasterAuto();
@@ -1420,11 +1552,22 @@ LRESULT CALLBACK WaveWndProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
         SetFocus(hwnd);
         int button = ButtonUnder(pt);
         if (button) ActivateButton(button);
-        else ClickPlot(pt);
+        else if (InDelaySlider(pt)) {
+            g_delayDragging = true;
+            SetCapture(hwnd);
+            SetDelayFromX(pt.x);
+        } else ClickPlot(pt);
         return 0;
     }
     case WM_LBUTTONUP: {
         POINT pt{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+        if (g_delayDragging) {
+            SetDelayFromX(pt.x);
+            g_delayDragging = false;
+            if (GetCapture() == hwnd) ReleaseCapture();
+            SaveStreamDelay();
+            return 0;
+        }
         if (g_dragging) {
             if (GetCapture() == hwnd) ReleaseCapture();
             g_dragging = false;
@@ -1446,6 +1589,10 @@ LRESULT CALLBACK WaveWndProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
     }
     case WM_MOUSEMOVE: {
         POINT pt{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+        if (g_delayDragging && (wparam & MK_LBUTTON)) {
+            SetDelayFromX(pt.x);
+            return 0;
+        }
         int hover = ButtonUnder(pt);
         if (hover != g_hover) {
             g_hover = hover;
@@ -1504,6 +1651,7 @@ static int PluginInit() {
     g_winamp = g_plugin.hwndParent;
     if (!g_winamp || !MakeStorage()) return 1;
     LoadMasterAuto();
+    LoadStreamDelay();
     WNDCLASSEXW cls{};
     cls.cbSize = sizeof(cls);
     cls.lpfnWndProc = WaveWndProc;
