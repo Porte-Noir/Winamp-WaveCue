@@ -20,8 +20,18 @@ jobs:
           $url = "https://raw.githubusercontent.com/nothings/stb/1ee679ca2ef753a528db5ba6801e1067b40481b8/stb_vorbis.c"
           Invoke-WebRequest -Uri $url -OutFile src/stb_vorbis.c
           if ((Get-Item src/stb_vorbis.c).Length -lt 100000) { throw "Incomplete OGG Vorbis decoder download" }
+      - name: Fetch pinned libKeyFinder (GPLv3+)
+        shell: pwsh
+        run: |
+          git clone --quiet https://github.com/mixxxdj/libkeyfinder.git third_party/libkeyfinder
+          git -C third_party/libkeyfinder checkout --quiet 941e517ebf853c2153a8b9d6efcc0c729199aa0b
+      - name: Install static FFTW3 for Win32
+        shell: pwsh
+        run: |
+          & "$env:VCPKG_INSTALLATION_ROOT/vcpkg.exe" install fftw3:x86-windows-static
+          if ($LASTEXITCODE -ne 0) { throw "Static FFTW3 installation failed" }
       - name: Configure Win32
-        run: cmake -S . -B build -G "Visual Studio 17 2022" -A Win32
+        run: cmake -S . -B build -G "Visual Studio 17 2022" -A Win32 -DFFTW3_INCLUDE_DIR="${{ env.VCPKG_INSTALLATION_ROOT }}/installed/x86-windows-static/include" -DFFTW3_LIBRARY="${{ env.VCPKG_INSTALLATION_ROOT }}/installed/x86-windows-static/lib/fftw3.lib"
       - name: Build Release
         run: cmake --build build --config Release
       - uses: actions/upload-artifact@v4
