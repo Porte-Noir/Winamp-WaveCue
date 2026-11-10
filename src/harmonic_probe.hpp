@@ -5,7 +5,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <vector>
-#include <keyfinder/keyfinder.h>
+#include "../third_party/libkeyfinder/src/keyfinder.h"
 
 namespace harmonic {
 class Probe {
