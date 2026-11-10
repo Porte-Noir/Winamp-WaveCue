@@ -29,6 +29,8 @@
 #include "core.hpp"
 #define DR_FLAC_IMPLEMENTATION
 #include "dr_flac.h"
+// Ogg Vorbis, decoded in the background without changing Winamp playback.
+#include "stb_vorbis.c"
 
 #pragma comment(lib, "mfplat.lib")
 #pragma comment(lib, "mfreadwrite.lib")
@@ -349,6 +351,237 @@ std::shared_ptr<WaveData> DecodeFlac(const Task& task, std::wstring& error) {
     return wave;
 }
 
+// OGG Vorbis waveform analysis uses a streaming decoder. It never allocates
+// a full decoded song, and shares the existing ~50ms peak-cache format.
+std::shared_ptr<WaveData> DecodeOgg(const Task& task, std::wstring& error) {
+    FILE* file = nullptr;
+    if (_wfopen_s(&file, task.path.c_str(), L"rb") != 0 || !file) {
+        error = L"Impossible d'ouvrir ce fichier OGG."; return {};
+    }
+    int decoderError = 0;
+    stb_vorbis* vorbis = stb_vorbis_open_file(file, 1, &decoderError, nullptr);
+    if (!vorbis) {
+        // On failure stb_vorbis does not consistently take ownership.
+        // Avoid a double fclose: the decoder's documented ownership applies
+        // to successfully opened streams.
+        fclose(file);
+        error = L"OGG Vorbis invalide ou codec OGG non pris en charge.";
+        return {};
+    }
+    stb_vorbis_info info = stb_vorbis_get_info(vorbis);
+    const int channels = info.channels, rate = info.sample_rate;
+    if (channels < 1 || channels > 32 || rate <= 0) {
+        stb_vorbis_close(vorbis);
+        error = L"Format audio OGG invalide."; return {};
+    }
+    constexpr int chunkFrames = 4096;
+    std::vector<short> samples(static_cast<size_t>(chunkFrames) * channels);
+    auto wave = std::make_shared<WaveData>();
+    const uint64_t bucketFrames = std::max<uint32_t>(1, static_cast<uint32_t>(rate) / 20);
+    const uint64_t expectedFrames = stb_vorbis_stream_length_in_samples(vorbis);
+    uint64_t frames = 0;
+    while (TaskCurrent(task)) {
+        const int got = stb_vorbis_get_samples_short_interleaved(
+            vorbis, channels, samples.data(), static_cast<int>(samples.size()));
+        if (got <= 0) break;
+        for (int i = 0; i < got; ++i, ++frames) {
+            const size_t bin = static_cast<size_t>(frames / bucketFrames);
+            if (bin >= 1000000) { error = L"OGG trop long pour cette version."; break; }
+            if (bin >= wave->peaks.size()) wave->peaks.resize(bin + 1, 0);
+            int peak = 0;
+            for (int ch = 0; ch < channels; ++ch) {
+                const int sample = samples[static_cast<size_t>(i) * channels + ch];
+                peak = std::max(peak, sample < 0 ? -sample : sample);
+            }
+            wave->peaks[bin] = static_cast<uint16_t>(
+                std::max<int>(wave->peaks[bin], std::min(peak, 32767)));
+        }
+        if (!error.empty()) break;
+        if (expectedFrames > 0 && !task.playing)
+            g_progress.store(static_cast<int>(std::min<uint64_t>(99, frames * 100 / expectedFrames)));
+        Sleep(0);
+    }
+    stb_vorbis_close(vorbis);
+    if (!TaskCurrent(task) || !error.empty()) return {};
+    if (!frames || wave->peaks.empty()) {
+        error = L"Aucun echantillon audio Vorbis exploitable."; return {};
+    }
+    wave->duration_ms = std::max<uint64_t>(1, frames * 1000 / static_cast<uint32_t>(rate));
+    return wave;
+}
+
+// AIFF and AIFC are IFF containers with big-endian chunk lengths. Supported
+// audio: signed PCM (8/16/24/32-bit), AIFC sowt (little-endian PCM),
+// and AIFC fl32 / fl64 floating point.
+uint32_t AiffU32(const unsigned char* p) {
+    return (uint32_t(p[0]) << 24) | (uint32_t(p[1]) << 16) |
+           (uint32_t(p[2]) << 8) | uint32_t(p[3]);
+}
+uint16_t AiffU16(const unsigned char* p) {
+    return static_cast<uint16_t>((uint16_t(p[0]) << 8) | p[1]);
+}
+bool AiffTag(const unsigned char* p, const char* tag) {
+    return memcmp(p, tag, 4) == 0;
+}
+double AiffRate(const unsigned char* p) {
+    const uint16_t exponent = AiffU16(p);
+    if ((exponent & 0x7fff) == 0 || (exponent & 0x7fff) == 0x7fff ||
+        (exponent & 0x8000)) return 0;
+    uint64_t mantissa = 0;
+    for (int i = 2; i < 10; ++i) mantissa = (mantissa << 8) | p[i];
+    return std::ldexp(static_cast<double>(mantissa), (exponent & 0x7fff) - 16383 - 63);
+}
+std::shared_ptr<WaveData> DecodeAiff(const Task& task, std::wstring& error) {
+    FILE* f = nullptr;
+    if (_wfopen_s(&f, task.path.c_str(), L"rb") != 0 || !f) {
+        error = L"Impossible d'ouvrir ce fichier AIFF."; return {};
+    }
+    unsigned char form[12]{};
+    if (fread(form, 1, sizeof(form), f) != sizeof(form) ||
+        !AiffTag(form, "FORM") ||
+        (!AiffTag(form + 8, "AIFF") && !AiffTag(form + 8, "AIFC"))) {
+        fclose(f); error = L"En-tete AIFF invalide."; return {};
+    }
+    const bool aifc = AiffTag(form + 8, "AIFC");
+    const uint64_t formEnd = uint64_t(AiffU32(form + 4)) + 8;
+    if (formEnd < 12 || formEnd > task.stamp.size) {
+        fclose(f); error = L"Taille AIFF invalide."; return {};
+    }
+    uint32_t channels = 0, framesDeclared = 0, bits = 0;
+    double sampleRate = 0;
+    int encoding = 0; // 0 = big endian integer, 1 = little endian integer, 2/3 = IEEE float
+    uint64_t audioOffset = 0, audioBytes = 0;
+    for (uint64_t pos = 12; pos + 8 <= formEnd;) {
+        unsigned char header[8]{};
+        if (_fseeki64(f, static_cast<__int64>(pos), SEEK_SET) != 0 ||
+            fread(header, 1, 8, f) != 8) break;
+        const uint64_t size = AiffU32(header + 4), start = pos + 8;
+        if (start + size > formEnd) {
+            fclose(f); error = L"Bloc AIFF incomplet."; return {};
+        }
+        if (AiffTag(header, "COMM")) {
+            unsigned char comm[22]{};
+            if (size < (aifc ? 22u : 18u) ||
+                fread(comm, 1, aifc ? 22 : 18, f) != (aifc ? 22u : 18u)) {
+                fclose(f); error = L"Bloc COMM AIFF invalide."; return {};
+            }
+            channels = AiffU16(comm);
+            framesDeclared = AiffU32(comm + 2);
+            bits = AiffU16(comm + 6);
+            sampleRate = AiffRate(comm + 8);
+            if (aifc) {
+                if (AiffTag(comm + 18, "sowt")) encoding = 1;
+                else if (AiffTag(comm + 18, "NONE") ||
+                         AiffTag(comm + 18, "twos")) encoding = 0;
+                else if (AiffTag(comm + 18, "fl32") ||
+                         AiffTag(comm + 18, "FL32")) encoding = 2;
+                else if (AiffTag(comm + 18, "fl64") ||
+                         AiffTag(comm + 18, "FL64")) encoding = 3;
+                else {
+                    fclose(f);
+                    error = L"Compression AIFF-C non prise en charge."; return {};
+                }
+            }
+        } else if (AiffTag(header, "SSND")) {
+            unsigned char sound[8]{};
+            if (size < 8 || fread(sound, 1, 8, f) != 8) {
+                fclose(f); error = L"Bloc SSND AIFF invalide."; return {};
+            }
+            const uint64_t offset = AiffU32(sound);
+            if (offset > size - 8) {
+                fclose(f); error = L"Decalage SSND AIFF invalide."; return {};
+            }
+            audioOffset = start + 8 + offset;
+            audioBytes = size - 8 - offset;
+        }
+        pos = start + size + (size & 1u);
+    }
+    const uint32_t bytesPerSample = (bits + 7) / 8;
+    const bool supported = (encoding <= 1 && (bits == 8 || bits == 16 || bits == 24 || bits == 32)) ||
+                           (encoding == 2 && bits == 32) || (encoding == 3 && bits == 64);
+    if (!supported || channels < 1 || channels > 32 ||
+        !(sampleRate >= 1000 && sampleRate <= 768000) ||
+        !audioOffset || !audioBytes) {
+        fclose(f); error = L"Format ou donnees AIFF non pris en charge."; return {};
+    }
+    const uint64_t frameBytes = uint64_t(channels) * bytesPerSample;
+    const uint64_t availableFrames = audioBytes / frameBytes;
+    const uint64_t totalFrames = framesDeclared ?
+        std::min<uint64_t>(framesDeclared, availableFrames) : availableFrames;
+    if (!totalFrames || _fseeki64(f, static_cast<__int64>(audioOffset), SEEK_SET) != 0) {
+        fclose(f); error = L"Aucune trame audio AIFF exploitable."; return {};
+    }
+    const uint32_t rate = static_cast<uint32_t>(std::llround(sampleRate));
+    const uint64_t bucketFrames = std::max<uint32_t>(1, rate / 20);
+    constexpr size_t chunkFrames = 4096;
+    std::vector<unsigned char> samples(chunkFrames * static_cast<size_t>(frameBytes));
+    auto wave = std::make_shared<WaveData>();
+    uint64_t frames = 0;
+    while (TaskCurrent(task) && frames < totalFrames) {
+        const size_t count = static_cast<size_t>(
+            std::min<uint64_t>(chunkFrames, totalFrames - frames));
+        const size_t got = fread(samples.data(), static_cast<size_t>(frameBytes), count, f);
+        if (!got) break;
+        for (size_t i = 0; i < got; ++i, ++frames) {
+            const size_t bin = static_cast<size_t>(frames / bucketFrames);
+            if (bin >= 1000000) { error = L"AIFF trop long pour cette version."; break; }
+            if (bin >= wave->peaks.size()) wave->peaks.resize(bin + 1, 0);
+            int peak = 0;
+            for (uint32_t ch = 0; ch < channels; ++ch) {
+                const unsigned char* p = samples.data() +
+                    (i * channels + ch) * bytesPerSample;
+                int amplitude = 0;
+                if (encoding <= 1) {
+                    uint64_t raw = 0;
+                    for (uint32_t j = 0; j < bytesPerSample; ++j)
+                        raw = encoding == 1 ? (raw | (uint64_t(p[j]) << (j * 8)))
+                                            : ((raw << 8) | p[j]);
+                    const uint32_t width = bytesPerSample * 8;
+                    int64_t signedSample = static_cast<int64_t>(raw);
+                    if (raw & (uint64_t(1) << (width - 1)))
+                        signedSample -= int64_t(1) << width;
+                    const int64_t sample16 = width >= 16 ?
+                        (signedSample / (int64_t(1) << (width - 16))) :
+                        (signedSample * (int64_t(1) << (16 - width)));
+                    amplitude = static_cast<int>(std::min<int64_t>(32767,
+                        sample16 < 0 ? -sample16 : sample16));
+                } else {
+                    uint64_t raw = 0;
+                    for (uint32_t j = 0; j < bytesPerSample; ++j)
+                        raw = (raw << 8) | p[j];
+                    double sample = 0;
+                    if (encoding == 2) {
+                        uint32_t bits32 = static_cast<uint32_t>(raw);
+                        float decoded = 0;
+                        memcpy(&decoded, &bits32, sizeof(decoded));
+                        sample = decoded;
+                    } else {
+                        memcpy(&sample, &raw, sizeof(sample));
+                    }
+                    if (std::isfinite(sample))
+                        amplitude = static_cast<int>(std::min(32767.0,
+                            std::fabs(sample) * 32767.0));
+                }
+                peak = std::max(peak, amplitude);
+            }
+            wave->peaks[bin] = static_cast<uint16_t>(
+                std::max<int>(wave->peaks[bin], peak));
+        }
+        if (!error.empty()) break;
+        if (!task.playing)
+            g_progress.store(static_cast<int>(std::min<uint64_t>(99,
+                frames * 100 / std::max<uint64_t>(1, totalFrames))));
+        Sleep(0);
+    }
+    fclose(f);
+    if (!TaskCurrent(task) || !error.empty()) return {};
+    if (!frames || wave->peaks.empty()) {
+        error = L"Lecture des echantillons AIFF impossible."; return {};
+    }
+    wave->duration_ms = std::max<uint64_t>(1, frames * 1000 / rate);
+    return wave;
+}
+
 // Strictly sequential 16-bit PCM decode. Peak data uses only ~72 KB per 30 minutes.
 std::shared_ptr<WaveData> DecodeWithMF(const Task& task, std::wstring& error) {
     IMFSourceReader* reader = nullptr;
@@ -460,9 +693,16 @@ void WorkerMain() {
         }
         auto result = std::make_unique<Result>();
         result->task = task;
-        const bool isFlac = task.path.size() >= 5 &&
-            _wcsicmp(task.path.c_str() + task.path.size() - 5, L".flac") == 0;
-        if (isFlac) result->wave = DecodeFlac(task, result->error);
+        const auto hasExt = [&](const wchar_t* ext) {
+            const size_t n = wcslen(ext);
+            return task.path.size() >= n &&
+                _wcsicmp(task.path.c_str() + task.path.size() - n, ext) == 0;
+        };
+        if (hasExt(L".flac")) result->wave = DecodeFlac(task, result->error);
+        else if (hasExt(L".ogg") || hasExt(L".oga"))
+            result->wave = DecodeOgg(task, result->error);
+        else if (hasExt(L".aif") || hasExt(L".aiff") || hasExt(L".aifc"))
+            result->wave = DecodeAiff(task, result->error);
         else if (mfReady) result->wave = DecodeWithMF(task, result->error);
         else result->error = L"Windows Media Foundation n'est pas disponible.";
         if (!TaskCurrent(task)) continue;
