@@ -153,7 +153,7 @@ std::vector<Button> g_buttons;
 int g_hover = 0;
 constexpr int BUTTON_LOAD = 1, BUTTON_SEEK = 2, BUTTON_START = 3,
               BUTTON_END = 4, BUTTON_DELETE = 5, BUTTON_AUTO = 6,
-              BUTTON_PLAYING_AUTO = 7;
+              BUTTON_PLAYING_AUTO = 7, BUTTON_PLAYING_LOAD = 8;
 
 std::wstring FileLabel(const std::wstring& path) {
     size_t pos = path.find_last_of(L"\\/");
@@ -523,8 +523,6 @@ void RequestLoad() {
     Task task{g_selectedPath, stamp, ++g_generation};
     if (auto cached = LoadCache(task)) {
         g_wave = std::move(cached);
-        if (_wcsicmp(g_selectedPath.c_str(), g_playingPath.c_str()) == 0)
-            g_playingWave = g_wave;
         g_isLoading = false;
         g_status = L"Waveform chargee depuis le cache.";
         RefreshButtonLayout();
@@ -563,8 +561,6 @@ void AcceptWorkerResult() {
     if (!done || !TaskCurrent(done->task) || done->task.path != g_selectedPath) return;
     g_isLoading = false;
     g_wave = std::move(done->wave);
-    if (_wcsicmp(g_selectedPath.c_str(), g_playingPath.c_str()) == 0 && g_wave)
-        g_playingWave = g_wave;
     RefreshButtonLayout();
     g_status = g_wave ? L"Waveform prete. Cliquez pour naviguer ou placer un cue."
                       : (done->error.empty() ? L"Impossible d'analyser ce fichier." : done->error);
@@ -599,7 +595,7 @@ void SeekPlaying(int64_t ms) {
         SendMessageW(g_winamp, WM_WA_IPC, static_cast<WPARAM>(ms), IPC_JUMPTOTIME);
 }
 
-void LoadPlayingWave(const std::wstring& path) {
+void ResetPlayingWave() {
     ++g_playGeneration;
     g_playingWave.reset();
     g_playingLoading = false;
@@ -608,21 +604,33 @@ void LoadPlayingWave(const std::wstring& path) {
         g_pendingPlayingTask.reset();
         g_completedPlaying.reset();
     }
-    if (path.empty()) return;
+}
+
+void RequestPlayingLoad() {
+    if (g_playingPath.empty() || g_playingIndex < 0 || g_playingLoading) return;
+    const std::wstring path = g_playingPath;
+    // Sharing an already-loaded selection avoids decoding twice, but only
+    // after the user explicitly clicks the playing waveform's Load button.
     if (_wcsicmp(path.c_str(), g_selectedPath.c_str()) == 0 && g_wave) {
         g_playingWave = g_wave;
+        InvalidateRect(g_hwnd, &g_playingPlot, FALSE);
         return;
     }
     FileStamp stamp{};
     if (!ReadFileStamp(path, stamp)) return;
     Task task{path, stamp, g_playGeneration.load(), true};
-    if (auto cached = LoadCache(task)) { g_playingWave = std::move(cached); return; }
+    if (auto cached = LoadCache(task)) {
+        g_playingWave = std::move(cached);
+        InvalidateRect(g_hwnd, &g_playingPlot, FALSE);
+        return;
+    }
     g_playingLoading = true;
     {
         std::lock_guard<std::mutex> lk(g_taskMutex);
         g_pendingPlayingTask = std::make_unique<Task>(std::move(task));
     }
     g_taskWake.notify_one();
+    InvalidateRect(g_hwnd, &g_playingPlot, FALSE);
 }
 
 void PollWinamp() {
@@ -640,7 +648,7 @@ void PollWinamp() {
     if (fileChanged) {
         g_playingPath = playPath;
         g_playbackCues = LoadCues(playPath);
-        LoadPlayingWave(playPath);
+        ResetPlayingWave();
         if (g_hwnd) {
             RefreshButtonLayout();
             InvalidateRect(g_hwnd, nullptr, FALSE);
@@ -754,9 +762,13 @@ void Layout(int width, int height) {
     };
     g_buttons.clear();
     // Independent control for the playing file, placed on its title row.
+    const int autoLeft = std::max(left + 320, width - left - 143);
+    const int loadLeft = autoLeft - 184;
+    g_buttons.push_back({BUTTON_PLAYING_LOAD,
+        {loadLeft, 49, loadLeft + 176, 79},
+        L"Show/Load Waveform", !g_playingPath.empty() && g_playingIndex >= 0});
     g_buttons.push_back({BUTTON_PLAYING_AUTO,
-        {std::max(left + 300, width - left - 143), 49,
-         std::max(left + 300, width - left - 143) + 143, 79},
+        {autoLeft, 49, autoLeft + 143, 79},
         L"Auto IN/OUT", !g_playingPath.empty() && g_playingIndex >= 0});
     int x = left, y = top;
     for (auto& b : specs) {
@@ -904,7 +916,7 @@ void Paint(HWND hwnd) {
     Text(dc, L"WAVECUE", title, TEXT, DT_SINGLELINE | DT_LEFT | DT_VCENTER, g_bigFont);
     RECT playingLabel{28, 49, w - 28, 80};
     Text(dc, L"ACTUALLY PLAYING", playingLabel, MUTED, DT_SINGLELINE | DT_VCENTER);
-    RECT playingFile{195, 49, std::max(215, w - 185), 80};
+    RECT playingFile{195, 49, std::max(196, w - 363), 80};
     Text(dc, g_playingPath.empty() ? L"Aucune lecture" : FileLabel(g_playingPath),
          playingFile, ACCENT, DT_SINGLELINE | DT_END_ELLIPSIS | DT_VCENTER);
     DrawPlayingWave(dc);
@@ -989,6 +1001,7 @@ bool MoveMarker(int64_t ms) {
 void ActivateButton(int id) {
     switch (id) {
     case BUTTON_LOAD: RequestLoad(); break;
+    case BUTTON_PLAYING_LOAD: RequestPlayingLoad(); break;
     case BUTTON_SEEK:
         g_mode = g_mode == ModeSeek ? ModeNone : ModeSeek;
         g_status = g_mode == ModeSeek
