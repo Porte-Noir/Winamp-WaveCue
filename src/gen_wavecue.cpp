@@ -240,7 +240,7 @@ void LoadMasterAuto() {
 void SaveMasterAuto() {
     FILE* f = nullptr;
     if (_wfopen_s(&f, (g_dataDir + L"\\master_auto.txt").c_str(), L"wb") != 0 || !f) return;
-    fprintf(f, "%d\\n", g_masterAuto ? 1 : 0);
+    fprintf(f, "%d\n", g_masterAuto ? 1 : 0);
     fclose(f);
 }
 
