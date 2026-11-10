@@ -1167,7 +1167,7 @@ bool InDelaySlider(POINT pt) {
 
 void SetDelayFromX(int x) {
     const int width = std::max<int>(1, g_delaySlider.right - g_delaySlider.left);
-    const int distance = std::clamp(x - g_delaySlider.left, 0, width);
+    const int distance = std::clamp<int>(x - g_delaySlider.left, 0, width);
     g_streamDelaySeconds = std::clamp((distance * 60 + width / 2) / width, 0, 60);
     UpdateDelayedPlayhead();
     InvalidateRect(g_hwnd, nullptr, FALSE);
