@@ -927,6 +927,11 @@ void AcceptWorkerResult() {
     if (!done || !TaskCurrent(done->task) || done->task.path != g_selectedPath) return;
     g_isLoading = false;
     g_wave = std::move(done->wave);
+    if (g_wave && g_playingWave &&
+        _wcsicmp(g_selectedPath.c_str(), g_playingPath.c_str()) == 0) {
+        g_playingWave = g_wave;
+        InvalidateRect(g_hwnd, &g_playingPlot, FALSE);
+    }
     RefreshButtonLayout();
     g_status = g_wave ? L"Waveform prete. Tonalite experimentale : " + std::wstring(harmonic::Camelot(g_wave->harmonicKey))
                       : (done->error.empty() ? L"Impossible d'analyser ce fichier." : done->error);
