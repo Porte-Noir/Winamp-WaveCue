@@ -104,10 +104,13 @@ struct WaveData {
     std::vector<uint16_t> peaks;
 };
 std::shared_ptr<WaveData> g_wave;
+std::shared_ptr<WaveData> g_playingWave;
+bool g_playingLoading = false;
+RECT g_playingPlot = {28, 83, 1000, 218};
 
 // Decoding runs exclusively in a background MTA thread.
 struct FileStamp { uint64_t size = 0; uint64_t modified = 0; };
-struct Task { std::wstring path; FileStamp stamp; uint64_t generation = 0; };
+struct Task { std::wstring path; FileStamp stamp; uint64_t generation = 0; bool playing = false; };
 struct Result {
     Task task;
     std::shared_ptr<WaveData> wave;
@@ -116,6 +119,9 @@ struct Result {
 std::mutex g_taskMutex;
 std::condition_variable g_taskWake;
 std::unique_ptr<Task> g_pendingTask;
+std::unique_ptr<Task> g_pendingPlayingTask;
+std::unique_ptr<Result> g_completedPlaying;
+std::atomic<uint64_t> g_playGeneration{0};
 std::unique_ptr<Result> g_completed;
 std::atomic<uint64_t> g_generation{0};
 std::atomic<int> g_progress{0};
@@ -240,6 +246,10 @@ struct CacheHeader {
 static_assert(sizeof(CacheHeader) == 40, "Cache header must be stable");
 constexpr uint32_t CACHE_MAGIC = 0x45554357u;
 
+bool TaskCurrent(const Task& task) {
+    return task.generation == (task.playing ? g_playGeneration.load() : g_generation.load());
+}
+
 std::shared_ptr<WaveData> LoadCache(const Task& task) {
     FILE* f = nullptr;
     if (_wfopen_s(&f, CachePath(task.path).c_str(), L"rb") != 0 || !f) return {};
@@ -292,7 +302,7 @@ std::shared_ptr<WaveData> DecodeFlac(const Task& task, std::wstring& error) {
     auto wave = std::make_shared<WaveData>();
     const uint64_t bucketFrames = std::max<uint32_t>(1, rate / 20);
     uint64_t frameCount = 0;
-    while (g_generation.load() == task.generation) {
+    while (TaskCurrent(task)) {
         drflac_uint64 got = drflac_read_pcm_frames_s16(flac, CHUNK, samples.data());
         if (got == 0) break;
         for (drflac_uint64 i = 0; i < got; ++i, ++frameCount) {
@@ -309,11 +319,11 @@ std::shared_ptr<WaveData> DecodeFlac(const Task& task, std::wstring& error) {
         }
         if (!error.empty()) break;
         if (flac->totalPCMFrameCount > 0)
-            g_progress.store(static_cast<int>(std::min<uint64_t>(99, frameCount * 100 / flac->totalPCMFrameCount)));
+            if (!task.playing) g_progress.store(static_cast<int>(std::min<uint64_t>(99, frameCount * 100 / flac->totalPCMFrameCount)));
         Sleep(0);
     }
     drflac_close(flac);
-    if (g_generation.load() != task.generation || !error.empty()) return {};
+    if (!TaskCurrent(task) || !error.empty()) return {};
     if (frameCount == 0 || wave->peaks.empty()) {
         error = L"FLAC sans echantillons audio."; return {};
     }
@@ -356,7 +366,7 @@ std::shared_ptr<WaveData> DecodeWithMF(const Task& task, std::wstring& error) {
             prop.vt == VT_UI8) estimatedFrames = prop.uhVal.QuadPart * rate / 10000000u;
         PropVariantClear(&prop);
         bool finished = false;
-        while (!finished && g_generation.load() == task.generation) {
+        while (!finished && TaskCurrent(task)) {
             DWORD flags = 0;
             IMFSample* sample = nullptr;
             hr = reader->ReadSample(stream, 0, nullptr, &flags, nullptr, &sample);
@@ -400,12 +410,12 @@ std::shared_ptr<WaveData> DecodeWithMF(const Task& task, std::wstring& error) {
             }
             if (estimatedFrames > 0) {
                 const int pct = static_cast<int>(std::min<uint64_t>(99, (frameCount / std::max<uint64_t>(1, estimatedFrames / 100))));
-                g_progress.store(pct);
+                if (!task.playing) g_progress.store(pct);
             }
             // Yield occasionally to avoid competing aggressively with Winamp's audio thread.
             Sleep(0);
         }
-        if (g_generation.load() != task.generation) wave.reset();
+        if (!TaskCurrent(task)) wave.reset();
         if (wave && frameCount && !wave->peaks.empty())
             wave->duration_ms = std::max<uint64_t>(1, frameCount * 1000 / rate);
         else if (wave) { error = L"Aucune donnee audio exploitable."; wave.reset(); }
@@ -425,10 +435,10 @@ void WorkerMain() {
         Task task;
         {
             std::unique_lock<std::mutex> lk(g_taskMutex);
-            g_taskWake.wait(lk, [] { return g_workerStop || g_pendingTask != nullptr; });
+            g_taskWake.wait(lk, [] { return g_workerStop || g_pendingTask != nullptr || g_pendingPlayingTask != nullptr; });
             if (g_workerStop) break;
-            task = *g_pendingTask;
-            g_pendingTask.reset();
+            if (g_pendingTask) { task = *g_pendingTask; g_pendingTask.reset(); }
+            else { task = *g_pendingPlayingTask; g_pendingPlayingTask.reset(); }
         }
         auto result = std::make_unique<Result>();
         result->task = task;
@@ -437,12 +447,13 @@ void WorkerMain() {
         if (isFlac) result->wave = DecodeFlac(task, result->error);
         else if (mfReady) result->wave = DecodeWithMF(task, result->error);
         else result->error = L"Windows Media Foundation n'est pas disponible.";
-        if (task.generation != g_generation.load()) continue;
+        if (!TaskCurrent(task)) continue;
         if (result->wave) SaveCache(task, *result->wave);
-        if (task.generation != g_generation.load()) continue;
+        if (!TaskCurrent(task)) continue;
         {
             std::lock_guard<std::mutex> lk(g_taskMutex);
-            g_completed = std::move(result);
+            if (task.playing) g_completedPlaying = std::move(result);
+            else g_completed = std::move(result);
         }
         if (HWND target = g_noticeHwnd.load()) PostMessageW(target, WM_WAVE_RESULT, 0, 0);
     }
@@ -511,6 +522,8 @@ void RequestLoad() {
     Task task{g_selectedPath, stamp, ++g_generation};
     if (auto cached = LoadCache(task)) {
         g_wave = std::move(cached);
+        if (_wcsicmp(g_selectedPath.c_str(), g_playingPath.c_str()) == 0)
+            g_playingWave = g_wave;
         g_isLoading = false;
         g_status = L"Waveform chargee depuis le cache.";
         RefreshButtonLayout();
@@ -530,14 +543,27 @@ void RequestLoad() {
 }
 
 void AcceptWorkerResult() {
+    std::unique_ptr<Result> playingDone;
+    {
+        std::lock_guard<std::mutex> lk(g_taskMutex);
+        playingDone = std::move(g_completedPlaying);
+    }
+    if (playingDone && playingDone->task.generation == g_playGeneration.load() &&
+        _wcsicmp(playingDone->task.path.c_str(), g_playingPath.c_str()) == 0) {
+        g_playingLoading = false;
+        g_playingWave = std::move(playingDone->wave);
+        InvalidateRect(g_hwnd, &g_playingPlot, FALSE);
+    }
     std::unique_ptr<Result> done;
     {
         std::lock_guard<std::mutex> lk(g_taskMutex);
         done = std::move(g_completed);
     }
-    if (!done || done->task.generation != g_generation.load() || done->task.path != g_selectedPath) return;
+    if (!done || done->!TaskCurrent(task) || done->task.path != g_selectedPath) return;
     g_isLoading = false;
     g_wave = std::move(done->wave);
+    if (_wcsicmp(g_selectedPath.c_str(), g_playingPath.c_str()) == 0 && g_wave)
+        g_playingWave = g_wave;
     RefreshButtonLayout();
     g_status = g_wave ? L"Waveform prete. Cliquez pour naviguer ou placer un cue."
                       : (done->error.empty() ? L"Impossible d'analyser ce fichier." : done->error);
@@ -572,6 +598,32 @@ void SeekPlaying(int64_t ms) {
         SendMessageW(g_winamp, WM_WA_IPC, static_cast<WPARAM>(ms), IPC_JUMPTOTIME);
 }
 
+void LoadPlayingWave(const std::wstring& path) {
+    ++g_playGeneration;
+    g_playingWave.reset();
+    g_playingLoading = false;
+    {
+        std::lock_guard<std::mutex> lk(g_taskMutex);
+        g_pendingPlayingTask.reset();
+        g_completedPlaying.reset();
+    }
+    if (path.empty()) return;
+    if (_wcsicmp(path.c_str(), g_selectedPath.c_str()) == 0 && g_wave) {
+        g_playingWave = g_wave;
+        return;
+    }
+    FileStamp stamp{};
+    if (!ReadFileStamp(path, stamp)) return;
+    Task task{path, stamp, g_playGeneration.load(), true};
+    if (auto cached = LoadCache(task)) { g_playingWave = std::move(cached); return; }
+    g_playingLoading = true;
+    {
+        std::lock_guard<std::mutex> lk(g_taskMutex);
+        g_pendingPlayingTask = std::make_unique<Task>(std::move(task));
+    }
+    g_taskWake.notify_one();
+}
+
 void PollWinamp() {
     if (!g_winamp || !IsWindow(g_winamp)) return;
     const int playing = static_cast<int>(SendMessageW(g_winamp, WM_WA_IPC, 0, IPC_GETLISTPOS));
@@ -587,6 +639,7 @@ void PollWinamp() {
     if (fileChanged) {
         g_playingPath = playPath;
         g_playbackCues = LoadCues(playPath);
+        LoadPlayingWave(playPath);
         g_skipSent = false;
         // The first notification may arrive before the decoder is ready or while
         // playback is still stopped/paused. Keep IN pending until it can be applied.
@@ -684,7 +737,8 @@ int ButtonUnder(POINT pt) {
 }
 
 void Layout(int width, int height) {
-    const int left = 28, top = 78, btnHeight = 34, gap = 8;
+    const int left = 28, top = 270, btnHeight = 34, gap = 8;
+    g_playingPlot = {left, 83, std::max(left + 120, width - left), 215};
     const struct { int id, w; const wchar_t* label; } specs[] = {
         {BUTTON_LOAD, 185, L"Show/Load Waveform"},
         {BUTTON_SEEK, 93, L"Seek"},
@@ -701,8 +755,8 @@ void Layout(int width, int height) {
                             b.label, (b.id == BUTTON_LOAD || b.id == BUTTON_AUTO) ? !g_selectedPath.empty() : !g_selectedPath.empty() && !!g_wave});
         x += b.w + gap;
     }
-    g_plot = {left, y + btnHeight + 22, std::max(left + 120, width - left),
-              std::max(y + btnHeight + 132, height - 112)};
+    g_plot = {left, y + btnHeight + 25, std::max(left + 120, width - left),
+              std::max(y + btnHeight + 110, height - 112)};
 }
 
 COLORREF ButtonColor(const Button& b) {
@@ -1098,7 +1152,7 @@ static int PluginInit() {
                             DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
     g_hwnd = CreateWindowExW(WS_EX_APPWINDOW, cls.lpszClassName, L"WaveCue - Winamp",
                               WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, CW_USEDEFAULT, CW_USEDEFAULT,
-                              1030, 620, nullptr, nullptr, g_plugin.hDllInstance, nullptr);
+                              1030, 670, nullptr, nullptr, g_plugin.hDllInstance, nullptr);
     if (!g_hwnd) {
         DeleteObject(g_font);
         DeleteObject(g_bigFont);
@@ -1141,10 +1195,12 @@ static void PluginQuit() {
     }
     g_noticeHwnd.store(nullptr);
     ++g_generation;
+    ++g_playGeneration;
     {
         std::lock_guard<std::mutex> lk(g_taskMutex);
         g_workerStop = true;
         g_pendingTask.reset();
+        g_pendingPlayingTask.reset();
     }
     g_taskWake.notify_one();
     if (g_worker.joinable()) g_worker.join();
