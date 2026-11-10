@@ -14,6 +14,12 @@ jobs:
           $url = "https://raw.githubusercontent.com/mackron/dr_libs/4ffbded724cc3e3d2838eebca70858bf5984385a/dr_flac.h"
           Invoke-WebRequest -Uri $url -OutFile src/dr_flac.h
           if ((Get-Item src/dr_flac.h).Length -lt 100000) { throw "Incomplete FLAC decoder download" }
+      - name: Fetch pinned stb_vorbis decoder for OGG Vorbis
+        shell: pwsh
+        run: |
+          $url = "https://raw.githubusercontent.com/nothings/stb/1ee679ca2ef753a528db5ba6801e1067b40481b8/stb_vorbis.c"
+          Invoke-WebRequest -Uri $url -OutFile src/stb_vorbis.c
+          if ((Get-Item src/stb_vorbis.c).Length -lt 100000) { throw "Incomplete OGG Vorbis decoder download" }
       - name: Configure Win32
         run: cmake -S . -B build -G "Visual Studio 17 2022" -A Win32
       - name: Build Release
