@@ -640,6 +640,7 @@ void PollWinamp() {
         g_playingPath = playPath;
         g_playbackCues = LoadCues(playPath);
         LoadPlayingWave(playPath);
+        if (g_hwnd) InvalidateRect(g_hwnd, nullptr, FALSE);
         g_skipSent = false;
         // The first notification may arrive before the decoder is ready or while
         // playback is still stopped/paused. Keep IN pending until it can be applied.
@@ -853,6 +854,32 @@ void DrawWave(HDC dc) {
     Text(dc, TimeLabel(PlotDuration()), base, MUTED, DT_SINGLELINE | DT_RIGHT);
 }
 
+void DrawPlayingWave(HDC dc) {
+    // The renderer is shared with the editing panel; restore all UI state
+    // before processing any further input, so only the lower panel is editable.
+    auto oldPlot = g_plot;
+    auto oldWave = g_wave;
+    auto oldCues = g_cues;
+    auto oldSelectedPath = g_selectedPath;
+    bool oldLoading = g_isLoading;
+    g_plot = g_playingPlot;
+    g_wave = g_playingWave;
+    g_cues = g_playbackCues;
+    g_selectedPath = g_playingPath;
+    g_isLoading = false;
+    DrawWave(dc);
+    if (!g_wave && g_playingLoading) {
+        RECT msg = g_playingPlot;
+        Text(dc, L"ANALYSE DU MORCEAU EN LECTURE...", msg, ACCENT,
+             DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    }
+    g_plot = oldPlot;
+    g_wave = oldWave;
+    g_cues = oldCues;
+    g_selectedPath = oldSelectedPath;
+    g_isLoading = oldLoading;
+}
+
 void Paint(HWND hwnd) {
     PAINTSTRUCT ps{};
     HDC target = BeginPaint(hwnd, &ps);
@@ -865,9 +892,17 @@ void Paint(HWND hwnd) {
     RectFill(dc, full, BG);
     RECT title{28, 14, w - 28, 45};
     Text(dc, L"WAVECUE", title, TEXT, DT_SINGLELINE | DT_LEFT | DT_VCENTER, g_bigFont);
-    RECT filename{165, 16, w - 28, 44};
+    RECT playingLabel{28, 49, w - 28, 80};
+    Text(dc, L"ACTUALLY PLAYING", playingLabel, MUTED, DT_SINGLELINE | DT_VCENTER);
+    RECT playingFile{195, 49, w - 28, 80};
+    Text(dc, g_playingPath.empty() ? L"Aucune lecture" : FileLabel(g_playingPath),
+         playingFile, ACCENT, DT_SINGLELINE | DT_END_ELLIPSIS | DT_VCENTER);
+    DrawPlayingWave(dc);
+    RECT selectedLabel{28, 229, w - 28, 259};
+    Text(dc, L"SELECTED TRACK", selectedLabel, MUTED, DT_SINGLELINE | DT_VCENTER);
+    RECT selectedFile{195, 229, w - 28, 259};
     Text(dc, g_selectedPath.empty() ? L"Aucun morceau selectionne" : FileLabel(g_selectedPath),
-         filename, ACCENT, DT_SINGLELINE | DT_END_ELLIPSIS | DT_VCENTER);
+         selectedFile, ACCENT, DT_SINGLELINE | DT_END_ELLIPSIS | DT_VCENTER);
     DrawButtons(dc);
     DrawWave(dc);
     RECT status{28, h - 66, w - 28, h - 42};
@@ -1042,6 +1077,8 @@ LRESULT CALLBACK WaveWndProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
             if (selectedBefore == g_selectedPath &&
                 (oldPlayhead != g_playheadMs || g_isLoading))
                 InvalidateRect(hwnd, &g_plot, FALSE);
+            if (oldPlayhead != g_playheadMs)
+                InvalidateRect(hwnd, &g_playingPlot, FALSE);
             return 0;
         }
         break;
