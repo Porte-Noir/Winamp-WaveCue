@@ -331,7 +331,7 @@ int ReadKeyCache(const Task& task) {
     int key = -2, version = 0;
     const int got = fscanf_s(f, "%d %llu %llu %d", &version, &size, &stamp, &key);
     fclose(f);
-    if (got != 4 || version != 3 || size != task.stamp.size ||
+    if (got != 4 || version != 4 || size != task.stamp.size ||
         stamp != task.stamp.modified || key < -1 || key >= 24) return -2;
     return key;
 }
@@ -343,7 +343,7 @@ void WriteKeyCache(const Task& task, int key) {
     const auto temp = dest + L".tmp";
     FILE* f = nullptr;
     if (_wfopen_s(&f, temp.c_str(), L"wb") != 0 || !f) return;
-    fprintf(f, "3 %llu %llu %d\n",
+    fprintf(f, "4 %llu %llu %d\n",
         static_cast<unsigned long long>(stamp.size),
         static_cast<unsigned long long>(stamp.modified), key);
     if (fclose(f) == 0) {
