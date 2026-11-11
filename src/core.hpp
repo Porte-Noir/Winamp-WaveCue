@@ -10,6 +10,7 @@ namespace wavecue {
 struct Cues {
     int64_t start_ms = -1;
     int64_t end_ms = -1;
+    int64_t crossfade_ms = -1; // optional early end-of-stream probe (experimental)
     bool auto_apply = false; // independent Auto IN/OUT setting for this audio file
     std::vector<int64_t> marks;
 };
@@ -27,21 +28,34 @@ inline uint64_t path_hash(const std::wstring& path) {
 }
 
 inline bool valid_range(const Cues& cues, int64_t duration_ms) {
-    return cues.start_ms >= -1 && cues.end_ms >= -1 &&
+    return cues.start_ms >= -1 && cues.end_ms >= -1 && cues.crossfade_ms >= -1 &&
+        (cues.crossfade_ms < 0 || cues.crossfade_ms <= duration_ms) &&
+        (cues.crossfade_ms < 0 || cues.start_ms < 0 || cues.start_ms < cues.crossfade_ms) &&
+        (cues.crossfade_ms < 0 || cues.end_ms < 0 || cues.crossfade_ms < cues.end_ms) &&
         (cues.start_ms < 0 || cues.start_ms <= duration_ms) &&
         (cues.end_ms < 0 || cues.end_ms <= duration_ms) &&
         (cues.start_ms < 0 || cues.end_ms < 0 || cues.start_ms < cues.end_ms);
 }
 
 inline bool set_start(Cues& cues, int64_t ms, int64_t duration_ms) {
-    if (ms < 0 || ms > duration_ms || (cues.end_ms >= 0 && ms >= cues.end_ms)) return false;
+    if (ms < 0 || ms > duration_ms || (cues.end_ms >= 0 && ms >= cues.end_ms) ||
+        (cues.crossfade_ms >= 0 && ms >= cues.crossfade_ms)) return false;
     cues.start_ms = ms;
     return true;
 }
 
 inline bool set_end(Cues& cues, int64_t ms, int64_t duration_ms) {
-    if (ms < 0 || ms > duration_ms || (cues.start_ms >= 0 && ms <= cues.start_ms)) return false;
+    if (ms < 0 || ms > duration_ms || (cues.start_ms >= 0 && ms <= cues.start_ms) ||
+        (cues.crossfade_ms >= 0 && ms <= cues.crossfade_ms)) return false;
     cues.end_ms = ms;
+    return true;
+}
+
+inline bool set_crossfade(Cues& cues, int64_t ms, int64_t duration_ms) {
+    if (ms < 0 || ms > duration_ms ||
+        (cues.start_ms >= 0 && ms <= cues.start_ms) ||
+        (cues.end_ms >= 0 && ms >= cues.end_ms)) return false;
+    cues.crossfade_ms = ms;
     return true;
 }
 
