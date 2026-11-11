@@ -53,6 +53,9 @@
 #define IPC_GETPLAYLISTFILEW 214
 #define IPC_PLAYLIST_GET_NEXT_SELECTED 3029
 #define WINAMP_BUTTON5 40048
+// Input decoders notify Winamp of a natural end of stream with WM_USER+2.
+// Experimental: simulate that notification without replacing the output engine.
+#define WM_WA_MPEG_EOF (WM_USER + 2)
 #define WM_WAVE_RESULT (WM_APP + 24)
 #define TIMER_POLL 11
 #define IPC_CB_MISC 603
@@ -156,11 +159,12 @@ constexpr COLORREF ACCENT = RGB(66, 202, 196);
 constexpr COLORREF CUE = RGB(245, 193, 107);
 constexpr COLORREF START = RGB(104, 209, 145);
 constexpr COLORREF END = RGB(239, 111, 123);
+constexpr COLORREF CROSSFADE = RGB(183, 137, 244);
 
 RECT g_plot = {34, 130, 1040, 435};
-enum Mode { ModeNone, ModeSeek, ModeStart, ModeEnd, ModeDelete };
+enum Mode { ModeNone, ModeSeek, ModeStart, ModeEnd, ModeCrossfade, ModeDelete };
 Mode g_mode = ModeNone;
-enum Marker { MarkerNone, MarkerCue, MarkerStart, MarkerEnd };
+enum Marker { MarkerNone, MarkerCue, MarkerStart, MarkerEnd, MarkerCrossfade };
 Marker g_marker = MarkerNone;
 int g_markerIndex = -1;
 bool g_dragging = false;
@@ -173,7 +177,7 @@ int g_hover = 0;
 constexpr int BUTTON_LOAD = 1, BUTTON_SEEK = 2, BUTTON_START = 3,
               BUTTON_END = 4, BUTTON_DELETE = 5, BUTTON_AUTO = 6,
               BUTTON_PLAYING_AUTO = 7, BUTTON_PLAYING_LOAD = 8, BUTTON_MASTER_AUTO = 9,
-              BUTTON_STREAM_DELAY = 10;
+              BUTTON_STREAM_DELAY = 10, BUTTON_CROSSFADE = 11;
 
 std::wstring FileLabel(const std::wstring& path) {
     size_t pos = path.find_last_of(L"\\/");
@@ -222,6 +226,7 @@ Cues LoadCues(const std::wstring& path) {
         long long ms = -1;
         if (sscanf_s(line, "S=%lld", &ms) == 1 && ms >= 0) result.start_ms = ms;
         else if (sscanf_s(line, "E=%lld", &ms) == 1 && ms >= 0) result.end_ms = ms;
+        else if (sscanf_s(line, "X=%lld", &ms) == 1 && ms >= 0) result.crossfade_ms = ms;
         else if (sscanf_s(line, "A=%lld", &ms) == 1) result.auto_apply = (ms == 1);
         else if (sscanf_s(line, "C=%lld", &ms) == 1 && ms >= 0 && result.marks.size() < 10000)
             result.marks.push_back(ms);
@@ -239,6 +244,7 @@ void SaveCues(const std::wstring& path, const Cues& c) {
     fputs("# WaveCue v1\n", f);
     if (c.start_ms >= 0) fprintf(f, "S=%lld\n", static_cast<long long>(c.start_ms));
     if (c.end_ms >= 0) fprintf(f, "E=%lld\n", static_cast<long long>(c.end_ms));
+    if (c.crossfade_ms >= 0) fprintf(f, "X=%lld\n", static_cast<long long>(c.crossfade_ms));
     fprintf(f, "A=%d\n", c.auto_apply ? 1 : 0);
     for (auto ms : c.marks) fprintf(f, "C=%lld\n", static_cast<long long>(ms));
     if (fclose(f) == 0) {
@@ -1074,10 +1080,20 @@ void PollWinamp() {
     while (!g_recentPlayback.empty() && stamp - g_recentPlayback.front().tick > 65000)
         g_recentPlayback.pop_front();
     UpdateDelayedPlayhead();
-    if (g_masterAuto && g_playbackCues.auto_apply && state == 1 && g_playbackCues.end_ms >= 0 && !g_skipSent &&
-        g_playheadMs >= g_playbackCues.end_ms) {
-        g_skipSent = true;
-        PostMessageW(g_winamp, WM_COMMAND, WINAMP_BUTTON5, 0);
+    if (g_masterAuto && g_playbackCues.auto_apply && state == 1 && !g_skipSent) {
+        // Crossfade marker takes precedence over OUT. The input-plugin EOF
+        // notification may or may not retain the DirectSound fading tail:
+        // this branch is intended ONLY for local audible testing.
+        if (g_playbackCues.crossfade_ms >= 0 &&
+            g_playheadMs >= g_playbackCues.crossfade_ms) {
+            g_skipSent = true;
+            PostMessageW(g_winamp, WM_WA_MPEG_EOF, 0, 0);
+        } else if (g_playbackCues.crossfade_ms < 0 &&
+                   g_playbackCues.end_ms >= 0 &&
+                   g_playheadMs >= g_playbackCues.end_ms) {
+            g_skipSent = true;
+            PostMessageW(g_winamp, WM_COMMAND, WINAMP_BUTTON5, 0);
+        }
     }
     if (!active) g_skipSent = false;
 }
@@ -1157,6 +1173,7 @@ void Layout(int width, int height) {
         {BUTTON_SEEK, 93, L"Seek"},
         {BUTTON_START, 91, L"Set IN"},
         {BUTTON_END, 92, L"Set OUT"},
+        {BUTTON_CROSSFADE, 126, L"Set Crossfade"},
         {BUTTON_DELETE, 93, L"Delete"},
         {BUTTON_AUTO, 139, L"Auto IN/OUT"},
     };
@@ -1201,6 +1218,7 @@ COLORREF ButtonColor(const Button& b) {
         (b.id == BUTTON_SEEK && g_mode == ModeSeek) ||
         (b.id == BUTTON_START && g_mode == ModeStart) ||
         (b.id == BUTTON_END && g_mode == ModeEnd) ||
+        (b.id == BUTTON_CROSSFADE && g_mode == ModeCrossfade) ||
         (b.id == BUTTON_DELETE && g_mode == ModeDelete) ||
         (b.id == BUTTON_DELETE && g_marker == MarkerNone && g_mode == ModeNone && g_hover == BUTTON_DELETE) ||
         (b.id == BUTTON_AUTO && g_cues.auto_apply) ||
@@ -1312,6 +1330,8 @@ void DrawWave(HDC dc) {
         DrawMarker(dc, g_cues.start_ms, START, L"IN");
     if (g_cues.end_ms >= 0)
         DrawMarker(dc, g_cues.end_ms, END, L"OUT");
+    if (g_cues.crossfade_ms >= 0)
+        DrawMarker(dc, g_cues.crossfade_ms, CROSSFADE, L"FADE");
     for (size_t i = 0; i < g_cues.marks.size(); ++i) {
         int x = XAt(g_cues.marks[i]);
         Line(dc, x, inner.top, x, inner.bottom, CUE);
@@ -1404,6 +1424,7 @@ void Paint(HWND hwnd) {
     std::wstring hint = g_mode == ModeSeek ? L"SEEK ARME : un seul clic sur la waveform deplace la lecture, puis se desactive."
         : g_mode == ModeStart ? L"Cliquez sur la waveform pour placer IN."
         : g_mode == ModeEnd ? L"Cliquez sur la waveform pour placer OUT."
+        : g_mode == ModeCrossfade ? L"Cliquez sur la waveform pour placer CROSSFADE (test EOF)."
         : g_mode == ModeDelete ? L"DELETE : cliquez sur un repere pour supprimer SANS deplacer la lecture."
         : L"Lecture protegee : activez SEEK pour sauter. Les anciens reperes restent disponibles pour suppression.";
     Text(dc, hint, tip, RGB(103, 115, 128), DT_SINGLELINE | DT_END_ELLIPSIS);
@@ -1431,6 +1452,7 @@ bool MarkAtX(int x) {
     };
     inspect(g_cues.start_ms, MarkerStart, -1);
     inspect(g_cues.end_ms, MarkerEnd, -1);
+    inspect(g_cues.crossfade_ms, MarkerCrossfade, -1);
     for (size_t i = 0; i < g_cues.marks.size(); ++i)
         inspect(g_cues.marks[i], MarkerCue, static_cast<int>(i));
     return g_marker != MarkerNone;
@@ -1440,6 +1462,7 @@ void RemoveMarker() {
     switch (g_marker) {
     case MarkerStart: g_cues.start_ms = -1; break;
     case MarkerEnd: g_cues.end_ms = -1; break;
+    case MarkerCrossfade: g_cues.crossfade_ms = -1; break;
     case MarkerCue:
         if (g_markerIndex >= 0 && static_cast<size_t>(g_markerIndex) < g_cues.marks.size())
             g_cues.marks.erase(g_cues.marks.begin() + g_markerIndex);
@@ -1458,6 +1481,7 @@ bool MoveMarker(int64_t ms) {
     switch (g_marker) {
     case MarkerStart: valid = wavecue::set_start(g_cues, ms, PlotDuration()); break;
     case MarkerEnd: valid = wavecue::set_end(g_cues, ms, PlotDuration()); break;
+    case MarkerCrossfade: valid = wavecue::set_crossfade(g_cues, ms, PlotDuration()); break;
     case MarkerCue:
         if (g_markerIndex >= 0 && static_cast<size_t>(g_markerIndex) < g_cues.marks.size()) {
             g_cues.marks[static_cast<size_t>(g_markerIndex)] = ms;
@@ -1486,8 +1510,10 @@ void ActivateButton(int id) {
         // Toggling the master switch in mid-song must never rewind or
         // immediately skip because the playhead passed OUT while disabled.
         g_startPending = false;
-        g_skipSent = g_masterAuto && g_playbackCues.end_ms >= 0 &&
-                     g_playheadMs >= g_playbackCues.end_ms;
+        g_skipSent = g_masterAuto && ((g_playbackCues.crossfade_ms >= 0 &&
+                      g_playheadMs >= g_playbackCues.crossfade_ms) ||
+                     (g_playbackCues.crossfade_ms < 0 && g_playbackCues.end_ms >= 0 &&
+                      g_playheadMs >= g_playbackCues.end_ms));
         g_status = g_masterAuto
             ? L"Auto IN/OUT global actif. Les reglages des chansons sont conserves."
             : L"Auto IN/OUT global suspendu. Lecture Winamp normale.";
@@ -1503,10 +1529,16 @@ void ActivateButton(int id) {
         break;
     case BUTTON_START: g_mode = g_mode == ModeStart ? ModeNone : ModeStart; break;
     case BUTTON_END: g_mode = g_mode == ModeEnd ? ModeNone : ModeEnd; break;
+    case BUTTON_CROSSFADE:
+        g_mode = g_mode == ModeCrossfade ? ModeNone : ModeCrossfade;
+        g_status = g_mode == ModeCrossfade
+            ? L"TEST EOF : placez une ligne CROSSFADE. Auto IN/OUT l activera."
+            : L"Placement CROSSFADE annule.";
+        break;
     case BUTTON_DELETE:
         g_mode = g_mode == ModeDelete ? ModeNone : ModeDelete;
         g_status = g_mode == ModeDelete
-            ? L"Mode suppression : cliquez sur une ligne IN, OUT ou CUE."
+            ? L"Mode suppression : cliquez sur une ligne IN, OUT, CROSSFADE ou CUE."
             : L"Mode suppression termine.";
         break;
     case BUTTON_PLAYING_AUTO:
@@ -1520,8 +1552,11 @@ void ActivateButton(int id) {
             // Enabling Auto mid-track must not instantly skip an already
             // passed OUT boundary; do not rewind to IN either.
             if (g_playbackCues.auto_apply)
-                g_skipSent = g_playbackCues.end_ms >= 0 &&
-                             g_playheadMs >= g_playbackCues.end_ms;
+                g_skipSent = (g_playbackCues.crossfade_ms >= 0 &&
+                              g_playheadMs >= g_playbackCues.crossfade_ms) ||
+                             (g_playbackCues.crossfade_ms < 0 &&
+                              g_playbackCues.end_ms >= 0 &&
+                              g_playheadMs >= g_playbackCues.end_ms);
             g_status = g_playbackCues.auto_apply
                 ? L"Auto IN/OUT actif pour le morceau en lecture."
                 : L"Auto IN/OUT desactive pour le morceau en lecture.";
@@ -1534,7 +1569,9 @@ void ActivateButton(int id) {
             // A new activation on the current track must not cause an accidental
             // immediate OUT skip; it applies at the next boundary crossing.
             if (g_cues.auto_apply && _wcsicmp(g_selectedPath.c_str(), g_playingPath.c_str()) == 0)
-                g_skipSent = (g_cues.end_ms >= 0 && g_playheadMs >= g_cues.end_ms);
+                g_skipSent = (g_cues.crossfade_ms >= 0 && g_playheadMs >= g_cues.crossfade_ms) ||
+                             (g_cues.crossfade_ms < 0 && g_cues.end_ms >= 0 &&
+                              g_playheadMs >= g_cues.end_ms);
             g_status = g_cues.auto_apply
                 ? L"Auto IN/OUT actif pour ce morceau seulement."
                 : L"Auto IN/OUT desactive pour ce morceau.";
@@ -1572,6 +1609,8 @@ void ClickPlot(POINT pt) {
         ok = wavecue::set_start(g_cues, ms, PlotDuration());
     } else if (g_mode == ModeEnd) {
         ok = wavecue::set_end(g_cues, ms, PlotDuration());
+    } else if (g_mode == ModeCrossfade) {
+        ok = wavecue::set_crossfade(g_cues, ms, PlotDuration());
     } else {
         if (MarkAtX(pt.x)) {
             g_dragging = true;
