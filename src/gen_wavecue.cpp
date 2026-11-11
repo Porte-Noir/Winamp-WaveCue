@@ -1087,6 +1087,8 @@ void PollWinamp() {
         if (g_playbackCues.crossfade_ms >= 0 &&
             g_playheadMs >= g_playbackCues.crossfade_ms) {
             g_skipSent = true;
+            g_status = L"TEST CROSSFADE : signal EOF envoye a Winamp.";
+            if (g_hwnd) InvalidateRect(g_hwnd, nullptr, FALSE);
             PostMessageW(g_winamp, WM_WA_MPEG_EOF, 0, 0);
         } else if (g_playbackCues.crossfade_ms < 0 &&
                    g_playbackCues.end_ms >= 0 &&
