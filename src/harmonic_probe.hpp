@@ -15,6 +15,8 @@ class Probe {
     unsigned int rate_ = 0;
     size_t framesTotal_ = 0;
     size_t maxFrames_ = 0;
+    size_t skipFrames_ = 0;
+    size_t analyzedFrames_ = 0;
     size_t flushFrames_ = 0;
     bool failed_ = false;
     KeyFinder::KeyFinder engine_;
@@ -41,8 +43,10 @@ public:
     explicit Probe(int sampleRate) {
         if (sampleRate < 8000 || sampleRate > 384000) return;
         rate_ = static_cast<unsigned int>(sampleRate);
-        // Fifteen minutes limits very long mixes while analyzing typical songs
-        // from their beginning through the end, at the true sample rate.
+        // DJs often have minute-long intros / percussive build-ups.
+        // Ignore the first 60 seconds *only for key detection*.
+        // Preserve the actual native sample rate for libKeyFinder.
+        skipFrames_ = static_cast<size_t>(rate_) * 60;
         maxFrames_ = static_cast<size_t>(rate_) * 900;
         flushFrames_ = static_cast<size_t>(rate_) * 8;
         samples_.reserve(flushFrames_);
@@ -50,13 +54,15 @@ public:
 
     void Add(float mono) {
         if (!rate_ || failed_ || framesTotal_ >= maxFrames_) return;
-        ++framesTotal_;
+        const size_t currentFrame = framesTotal_++;
+        if (currentFrame < skipFrames_) return;
+        ++analyzedFrames_;
         samples_.push_back(std::isfinite(mono) ? std::clamp(mono, -1.0f, 1.0f) : 0.0f);
         if (samples_.size() >= flushFrames_) Flush();
     }
 
     int Estimate() {
-        if (failed_ || !rate_ || framesTotal_ < static_cast<size_t>(rate_) * 10)
+        if (failed_ || !rate_ || analyzedFrames_ < static_cast<size_t>(rate_) * 10)
             return -1;
         Flush();
         if (failed_) return -1;
