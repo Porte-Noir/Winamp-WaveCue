@@ -1556,11 +1556,12 @@ void ActivateButton(int id) {
                 g_cues.auto_apply = g_playbackCues.auto_apply;
             // Enabling Auto mid-track must not instantly skip an already
             // passed OUT boundary; do not rewind to IN either.
-            if (g_playbackCues.auto_apply)
+            if (g_playbackCues.auto_apply) {
                 const auto fade = g_playbackCues.crossfade_ms;
                 const auto out = g_playbackCues.end_ms;
                 const auto first = (fade >= 0 && (out < 0 || fade < out)) ? fade : out;
                 g_skipSent = first >= 0 && g_playheadMs >= first;
+            }
             g_status = g_playbackCues.auto_apply
                 ? L"Auto IN/OUT actif pour le morceau en lecture."
                 : L"Auto IN/OUT desactive pour le morceau en lecture.";
@@ -1572,11 +1573,12 @@ void ActivateButton(int id) {
             CommitCues();
             // A new activation on the current track must not cause an accidental
             // immediate OUT skip; it applies at the next boundary crossing.
-            if (g_cues.auto_apply && _wcsicmp(g_selectedPath.c_str(), g_playingPath.c_str()) == 0)
+            if (g_cues.auto_apply && _wcsicmp(g_selectedPath.c_str(), g_playingPath.c_str()) == 0) {
                 const auto fade = g_cues.crossfade_ms;
                 const auto out = g_cues.end_ms;
                 const auto first = (fade >= 0 && (out < 0 || fade < out)) ? fade : out;
                 g_skipSent = first >= 0 && g_playheadMs >= first;
+            }
             g_status = g_cues.auto_apply
                 ? L"Auto IN/OUT actif pour ce morceau seulement."
                 : L"Auto IN/OUT desactive pour ce morceau.";
