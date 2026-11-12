@@ -1081,20 +1081,23 @@ void PollWinamp() {
         g_recentPlayback.pop_front();
     UpdateDelayedPlayhead();
     if (g_masterAuto && g_playbackCues.auto_apply && state == 1 && !g_skipSent) {
-        // Crossfade marker takes precedence over OUT. The input-plugin EOF
-        // notification may or may not retain the DirectSound fading tail:
-        // this branch is intended ONLY for local audible testing.
-        if (g_playbackCues.crossfade_ms >= 0 &&
-            g_playheadMs >= g_playbackCues.crossfade_ms) {
+        // The earliest of OUT and FADE takes effect. Keep the original OUT
+        // behavior for songs without FADE or with OUT before FADE.
+        const int64_t fade = g_playbackCues.crossfade_ms;
+        const int64_t out = g_playbackCues.end_ms;
+        const bool fadeFirst = fade >= 0 && (out < 0 || fade < out);
+        const int64_t boundary = fadeFirst ? fade : out;
+        if (boundary >= 0 && g_playheadMs >= boundary) {
             g_skipSent = true;
-            g_status = L"TEST CROSSFADE : signal EOF envoye a Winamp.";
-            if (g_hwnd) InvalidateRect(g_hwnd, nullptr, FALSE);
-            PostMessageW(g_winamp, WM_WA_MPEG_EOF, 0, 0);
-        } else if (g_playbackCues.crossfade_ms < 0 &&
-                   g_playbackCues.end_ms >= 0 &&
-                   g_playheadMs >= g_playbackCues.end_ms) {
-            g_skipSent = true;
-            PostMessageW(g_winamp, WM_COMMAND, WINAMP_BUTTON5, 0);
+            if (fadeFirst) {
+                // EOF notification is experimental: its interaction with
+                // DirectSound's buffered tail requires an audible Winamp test.
+                g_status = L"TEST CROSSFADE : signal EOF envoye a Winamp.";
+                if (g_hwnd) InvalidateRect(g_hwnd, nullptr, FALSE);
+                PostMessageW(g_winamp, WM_WA_MPEG_EOF, 0, 0);
+            } else {
+                PostMessageW(g_winamp, WM_COMMAND, WINAMP_BUTTON5, 0);
+            }
         }
     }
     if (!active) g_skipSent = false;
@@ -1512,10 +1515,10 @@ void ActivateButton(int id) {
         // Toggling the master switch in mid-song must never rewind or
         // immediately skip because the playhead passed OUT while disabled.
         g_startPending = false;
-        g_skipSent = g_masterAuto && ((g_playbackCues.crossfade_ms >= 0 &&
-                      g_playheadMs >= g_playbackCues.crossfade_ms) ||
-                     (g_playbackCues.crossfade_ms < 0 && g_playbackCues.end_ms >= 0 &&
-                      g_playheadMs >= g_playbackCues.end_ms));
+        const auto fade = g_playbackCues.crossfade_ms;
+        const auto out = g_playbackCues.end_ms;
+        const auto first = (fade >= 0 && (out < 0 || fade < out)) ? fade : out;
+        g_skipSent = g_masterAuto && first >= 0 && g_playheadMs >= first;
         g_status = g_masterAuto
             ? L"Auto IN/OUT global actif. Les reglages des chansons sont conserves."
             : L"Auto IN/OUT global suspendu. Lecture Winamp normale.";
@@ -1554,11 +1557,10 @@ void ActivateButton(int id) {
             // Enabling Auto mid-track must not instantly skip an already
             // passed OUT boundary; do not rewind to IN either.
             if (g_playbackCues.auto_apply)
-                g_skipSent = (g_playbackCues.crossfade_ms >= 0 &&
-                              g_playheadMs >= g_playbackCues.crossfade_ms) ||
-                             (g_playbackCues.crossfade_ms < 0 &&
-                              g_playbackCues.end_ms >= 0 &&
-                              g_playheadMs >= g_playbackCues.end_ms);
+                const auto fade = g_playbackCues.crossfade_ms;
+                const auto out = g_playbackCues.end_ms;
+                const auto first = (fade >= 0 && (out < 0 || fade < out)) ? fade : out;
+                g_skipSent = first >= 0 && g_playheadMs >= first;
             g_status = g_playbackCues.auto_apply
                 ? L"Auto IN/OUT actif pour le morceau en lecture."
                 : L"Auto IN/OUT desactive pour le morceau en lecture.";
@@ -1571,9 +1573,10 @@ void ActivateButton(int id) {
             // A new activation on the current track must not cause an accidental
             // immediate OUT skip; it applies at the next boundary crossing.
             if (g_cues.auto_apply && _wcsicmp(g_selectedPath.c_str(), g_playingPath.c_str()) == 0)
-                g_skipSent = (g_cues.crossfade_ms >= 0 && g_playheadMs >= g_cues.crossfade_ms) ||
-                             (g_cues.crossfade_ms < 0 && g_cues.end_ms >= 0 &&
-                              g_playheadMs >= g_cues.end_ms);
+                const auto fade = g_cues.crossfade_ms;
+                const auto out = g_cues.end_ms;
+                const auto first = (fade >= 0 && (out < 0 || fade < out)) ? fade : out;
+                g_skipSent = first >= 0 && g_playheadMs >= first;
             g_status = g_cues.auto_apply
                 ? L"Auto IN/OUT actif pour ce morceau seulement."
                 : L"Auto IN/OUT desactive pour ce morceau.";
