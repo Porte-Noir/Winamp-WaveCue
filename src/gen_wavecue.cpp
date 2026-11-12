@@ -1159,7 +1159,7 @@ void Layout(int width, int height) {
     const int masterLeft = std::max(left + 445, right - 153);
     const int delayLeft = left + 143;
     g_delaySlider = {delayLeft + 124, 13,
-        std::max(delayLeft + 155, masterLeft - 72), 31};
+        std::max(delayLeft + 155, masterLeft - 84), 31};
     g_buttons.push_back({BUTTON_STREAM_DELAY,
         {delayLeft, 9, delayLeft + 117, 36},
         g_streamDelayEnabled ? L"DELAY ON" : L"DELAY OFF", true});
