@@ -1509,7 +1509,7 @@ void ActivateButton(int id) {
             ? L"Indicateur Twitch actif : delai visuel estime, sans traitement audio."
             : L"Indicateur Twitch desactive.";
         break;
-    case BUTTON_MASTER_AUTO:
+    case BUTTON_MASTER_AUTO: {
         g_masterAuto = !g_masterAuto;
         SaveMasterAuto();
         // Toggling the master switch in mid-song must never rewind or
@@ -1524,6 +1524,7 @@ void ActivateButton(int id) {
             : L"Auto IN/OUT global suspendu. Lecture Winamp normale.";
         RefreshButtonLayout();
         break;
+    }
     case BUTTON_LOAD: RequestLoad(); break;
     case BUTTON_PLAYING_LOAD: RequestPlayingLoad(); break;
     case BUTTON_SEEK:
