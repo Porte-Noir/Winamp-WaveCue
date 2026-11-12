@@ -147,15 +147,17 @@ std::atomic<int> g_progress{0};
 std::thread g_worker;
 bool g_workerStop = false;
 
-constexpr COLORREF BG = RGB(15, 18, 25);
-constexpr COLORREF PANEL = RGB(24, 30, 40);
-constexpr COLORREF BORDER = RGB(53, 64, 78);
-constexpr COLORREF TEXT = RGB(227, 232, 239);
-constexpr COLORREF MUTED = RGB(145, 159, 173);
-constexpr COLORREF ACCENT = RGB(66, 202, 196);
-constexpr COLORREF CUE = RGB(245, 193, 107);
-constexpr COLORREF START = RGB(104, 209, 145);
-constexpr COLORREF END = RGB(239, 111, 123);
+// Winamp classic skin: graphite/violet panels with LCD green accents.
+constexpr COLORREF BG = RGB(25, 25, 37);
+constexpr COLORREF PANEL = RGB(37, 37, 53);
+constexpr COLORREF BORDER = RGB(83, 79, 102);
+constexpr COLORREF TEXT = RGB(221, 224, 229);
+constexpr COLORREF MUTED = RGB(155, 156, 174);
+constexpr COLORREF LCD = RGB(124, 225, 66);
+constexpr COLORREF ACCENT = RGB(111, 199, 186);
+constexpr COLORREF CUE = RGB(220, 182, 103);
+constexpr COLORREF START = RGB(127, 220, 105);
+constexpr COLORREF END = RGB(234, 112, 126);
 
 RECT g_plot = {34, 130, 1040, 435};
 enum Mode { ModeNone, ModeSeek, ModeStart, ModeEnd, ModeDelete };
@@ -1150,62 +1152,54 @@ int ButtonUnder(POINT pt) {
 }
 
 void Layout(int width, int height) {
-    const int left = 28, top = 294, btnHeight = 34, gap = 8;
-    g_playingPlot = {left, 83, std::max(left + 120, width - left), 215};
-    const struct { int id, w; const wchar_t* label; } specs[] = {
-        {BUTTON_LOAD, 185, L"Show/Load Waveform"},
-        {BUTTON_SEEK, 93, L"Seek"},
-        {BUTTON_START, 91, L"Set IN"},
-        {BUTTON_END, 92, L"Set OUT"},
-        {BUTTON_DELETE, 93, L"Delete"},
-        {BUTTON_AUTO, 139, L"Auto IN/OUT"},
-    };
+    // One compact row for LOAD, SEEK, IN and OUT, even at minimum window width.
+    const int left = 22, right = std::max(left + 280, width - left);
+    g_playingPlot = {left, 80, right, 203};
     g_buttons.clear();
-    // Live stream monitor: visual indicator only, no audio processing.
-    const int masterLeft = std::max(left + 260, width - left - 168);
-    const int delayLeft = left + 166;
-    g_delaySlider = {delayLeft + 146, 19,
-        std::max(delayLeft + 186, masterLeft - 87), 37};
+    const int masterLeft = std::max(left + 445, right - 153);
+    const int delayLeft = left + 143;
+    g_delaySlider = {delayLeft + 124, 13,
+        std::max(delayLeft + 155, masterLeft - 72), 31};
     g_buttons.push_back({BUTTON_STREAM_DELAY,
-        {delayLeft, 12, delayLeft + 137, 43},
-        g_streamDelayEnabled ? L"Stream Delay ON" : L"Stream Delay OFF", true});
-    // Master override: one click suspends all automatic jumps and skips.
+        {delayLeft, 9, delayLeft + 117, 36},
+        g_streamDelayEnabled ? L"DELAY ON" : L"DELAY OFF", true});
     g_buttons.push_back({BUTTON_MASTER_AUTO,
-        {std::max(left + 260, width - left - 168), 12,
-         std::max(left + 260, width - left - 168) + 168, 43},
-        g_masterAuto ? L"WaveCue Auto ON" : L"WaveCue Auto OFF", true});
-    // Independent control for the playing file, placed on its title row.
-    const int autoLeft = std::max(left + 320, width - left - 143);
-    const int loadLeft = autoLeft - 184;
-    g_buttons.push_back({BUTTON_PLAYING_LOAD,
-        {loadLeft, 49, loadLeft + 176, 79},
-        L"Show/Load Waveform", !g_playingPath.empty() && g_playingIndex >= 0});
-    g_buttons.push_back({BUTTON_PLAYING_AUTO,
-        {autoLeft, 49, autoLeft + 143, 79},
-        L"Auto IN/OUT", !g_playingPath.empty() && g_playingIndex >= 0});
-    int x = left, y = top;
-    for (auto& b : specs) {
-        if (x != left && x + b.w > width - left) { x = left; y += btnHeight + gap; }
-        g_buttons.push_back({b.id, {x,y,x+b.w,y+btnHeight},
-                            b.label, (b.id == BUTTON_LOAD || b.id == BUTTON_AUTO) ? !g_selectedPath.empty() : !g_selectedPath.empty() && !!g_wave});
-        x += b.w + gap;
+        {masterLeft, 9, masterLeft + 153, 36},
+        g_masterAuto ? L"WAVECUE AUTO ON" : L"WAVECUE AUTO OFF", true});
+    const int autoLeft = right - 121, loadLeft = autoLeft - 160;
+    g_buttons.push_back({BUTTON_PLAYING_LOAD, {loadLeft, 45, loadLeft + 153, 73},
+        L"LOAD WAVEFORM", !g_playingPath.empty() && g_playingIndex >= 0});
+    g_buttons.push_back({BUTTON_PLAYING_AUTO, {autoLeft, 45, autoLeft + 121, 73},
+        L"AUTO IN/OUT", !g_playingPath.empty() && g_playingIndex >= 0});
+    const struct { int id, w; const wchar_t* label; } specs[] = {
+        {BUTTON_LOAD, 163, L"LOAD WAVEFORM"}, {BUTTON_SEEK, 72, L"SEEK"},
+        {BUTTON_START, 82, L"SET IN"}, {BUTTON_END, 82, L"SET OUT"},
+        {BUTTON_DELETE, 80, L"DELETE"}, {BUTTON_AUTO, 125, L"AUTO IN/OUT"},
+    };
+    int x = left;
+    for (const auto& b : specs) {
+        g_buttons.push_back({b.id, {x, 281, x + b.w, 309},
+            b.label, (b.id == BUTTON_LOAD || b.id == BUTTON_AUTO)
+                ? !g_selectedPath.empty() : !g_selectedPath.empty() && !!g_wave});
+        x += b.w + 7;
     }
-    g_plot = {left, y + btnHeight + 25, std::max(left + 120, width - left),
-              std::max(y + btnHeight + 110, height - 112)};
+    g_plot = {left, 322, right, std::max(426, height - 82)};
 }
 
-COLORREF ButtonColor(const Button& b) {
-    if (!b.enabled) return RGB(29, 34, 43);
-    if ((b.id == BUTTON_MASTER_AUTO && g_masterAuto) ||
+bool ButtonActive(const Button& b) {
+    return (b.id == BUTTON_MASTER_AUTO && g_masterAuto) ||
         (b.id == BUTTON_STREAM_DELAY && g_streamDelayEnabled) ||
         (b.id == BUTTON_SEEK && g_mode == ModeSeek) ||
         (b.id == BUTTON_START && g_mode == ModeStart) ||
         (b.id == BUTTON_END && g_mode == ModeEnd) ||
         (b.id == BUTTON_DELETE && g_mode == ModeDelete) ||
-        (b.id == BUTTON_DELETE && g_marker == MarkerNone && g_mode == ModeNone && g_hover == BUTTON_DELETE) ||
         (b.id == BUTTON_AUTO && g_cues.auto_apply) ||
-        (b.id == BUTTON_PLAYING_AUTO && g_playbackCues.auto_apply)) return RGB(29, 89, 87);
-    return b.id == g_hover ? RGB(52, 70, 84) : PANEL;
+        (b.id == BUTTON_PLAYING_AUTO && g_playbackCues.auto_apply);
+}
+COLORREF ButtonColor(const Button& b) {
+    if (!b.enabled) return RGB(29, 29, 40);
+    if (ButtonActive(b)) return RGB(53, 76, 53);
+    return b.id == g_hover ? RGB(75, 70, 90) : RGB(53, 51, 68);
 }
 
 void DrawDelaySlider(HDC dc) {
@@ -1215,12 +1209,12 @@ void DrawDelaySlider(HDC dc) {
     const int width = std::max<int>(1, rail.right - rail.left);
     const int x = rail.left + g_streamDelaySeconds * width / 60;
     RECT used{rail.left, rail.top, x, rail.bottom};
-    RectFill(dc, used, g_streamDelayEnabled ? RGB(223, 86, 89) : MUTED);
+    RectFill(dc, used, g_streamDelayEnabled ? LCD : MUTED);
     RECT thumb{x - 4, 19, x + 5, 37};
-    RectFill(dc, thumb, g_streamDelayEnabled ? RGB(233, 100, 105) : TEXT);
+    RectFill(dc, thumb, g_streamDelayEnabled ? LCD : TEXT);
     RECT readout{g_delaySlider.right + 9, 13, g_delaySlider.right + 78, 44};
     Text(dc, std::to_wstring(g_streamDelaySeconds) + L" s", readout,
-         g_streamDelayEnabled ? RGB(233, 100, 105) : MUTED,
+         g_streamDelayEnabled ? LCD : MUTED,
          DT_SINGLELINE | DT_VCENTER);
 }
 
@@ -1240,11 +1234,20 @@ void SetDelayFromX(int x) {
 }
 
 void DrawButtons(HDC dc) {
+    // Restrained raised/sunken beveled buttons from the classic Winamp era.
     for (const auto& b : g_buttons) {
         RectFill(dc, b.bounds, ButtonColor(b));
-        RectOutline(dc, b.bounds, b.enabled ? BORDER : RGB(41, 48, 56));
-        Text(dc, b.text, b.bounds, b.enabled ? TEXT : RGB(99, 113, 125),
-             DT_SINGLELINE | DT_CENTER | DT_VCENTER);
+        const bool pressed = b.enabled && ButtonActive(b);
+        COLORREF light = pressed ? RGB(20, 22, 30) : RGB(123, 119, 142);
+        COLORREF dark = pressed ? RGB(122, 129, 112) : RGB(16, 17, 25);
+        Line(dc, b.bounds.left, b.bounds.bottom - 1, b.bounds.left, b.bounds.top, light);
+        Line(dc, b.bounds.left, b.bounds.top, b.bounds.right - 1, b.bounds.top, light);
+        Line(dc, b.bounds.right - 1, b.bounds.top, b.bounds.right - 1, b.bounds.bottom - 1, dark);
+        Line(dc, b.bounds.right - 1, b.bounds.bottom - 1, b.bounds.left, b.bounds.bottom - 1, dark);
+        RECT label = b.bounds;
+        if (pressed) OffsetRect(&label, 1, 1);
+        Text(dc, b.text, label, !b.enabled ? RGB(94, 93, 113) :
+             pressed ? LCD : TEXT, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
     }
 }
 
@@ -1258,12 +1261,12 @@ void DrawMarker(HDC dc, int64_t ms, COLORREF color, const wchar_t* label, bool l
 }
 
 void DrawWave(HDC dc) {
-    RectFill(dc, g_plot, PANEL);
+    RectFill(dc, g_plot, RGB(13, 18, 22));
     RectOutline(dc, g_plot, BORDER);
     RECT inner = g_plot;
     InflateRect(&inner, -10, -9);
     const int cy = (inner.top + inner.bottom) / 2;
-    Line(dc, inner.left, cy, inner.right, cy, RGB(57, 72, 86));
+    Line(dc, inner.left, cy, inner.right, cy, RGB(46, 57, 57));
     if (!g_wave || g_wave->peaks.empty()) {
         std::wstring msg = g_isLoading
             ? L"ANALYSE EN COURS : " + std::to_wstring(g_progress.load()) + L" %"
@@ -1304,7 +1307,7 @@ void DrawWave(HDC dc) {
 
     if (g_wave->harmonicKey >= 0) {
         RECT keyRect{g_plot.right - 85, g_plot.top + 8, g_plot.right - 10, g_plot.top + 39};
-        RectFill(dc, keyRect, RGB(39, 54, 72));
+        RectFill(dc, keyRect, RGB(35, 37, 51));
         Text(dc, harmonic::Camelot(g_wave->harmonicKey), keyRect, RGB(255, 209, 108),
              DT_CENTER | DT_VCENTER | DT_SINGLELINE, g_bigFont);
     }
@@ -1382,31 +1385,36 @@ void Paint(HWND hwnd) {
     HBITMAP bitmap = CreateCompatibleBitmap(target, w, h);
     HGDIOBJ previousBmp = SelectObject(dc, bitmap);
     RectFill(dc, full, BG);
-    RECT title{28, 14, w - 28, 45};
-    Text(dc, L"WAVECUE", title, TEXT, DT_SINGLELINE | DT_LEFT | DT_VCENTER, g_bigFont);
-    RECT playingLabel{28, 49, w - 28, 80};
-    Text(dc, L"ACTUALLY PLAYING", playingLabel, MUTED, DT_SINGLELINE | DT_VCENTER);
-    RECT playingFile{195, 49, std::max(196, w - 363), 80};
+    RECT toolbar{0, 0, w, 41};
+    RectFill(dc, toolbar, PANEL);
+    Line(dc, 0, 40, w, 40, BORDER);
+    RECT title{22, 8, 170, 36};
+    Text(dc, L"WAVECUE", title, LCD, DT_SINGLELINE | DT_LEFT | DT_VCENTER, g_bigFont);
+    RECT playingLabel{22, 45, 174, 74};
+    Text(dc, L"ACTUALLY PLAYING", playingLabel, TEXT, DT_SINGLELINE | DT_VCENTER);
+    RECT playingFile{176, 45, std::max(177, w - 317), 74};
     Text(dc, g_playingPath.empty() ? L"Aucune lecture" : FileLabel(g_playingPath),
-         playingFile, ACCENT, DT_SINGLELINE | DT_END_ELLIPSIS | DT_VCENTER);
+         playingFile, LCD, DT_SINGLELINE | DT_END_ELLIPSIS | DT_VCENTER);
     DrawPlayingWave(dc);
-    RECT selectedLabel{28, 255, w - 28, 285};
-    Text(dc, L"SELECTED TRACK", selectedLabel, MUTED, DT_SINGLELINE | DT_VCENTER);
-    RECT selectedFile{195, 255, w - 28, 285};
+    Line(dc, 22, 242, w - 22, 242, BORDER);
+    RECT selectedLabel{22, 249, 174, 278};
+    Text(dc, L"SELECTED TRACK", selectedLabel, TEXT, DT_SINGLELINE | DT_VCENTER);
+    RECT selectedFile{176, 249, w - 22, 278};
     Text(dc, g_selectedPath.empty() ? L"Aucun morceau selectionne" : FileLabel(g_selectedPath),
-         selectedFile, ACCENT, DT_SINGLELINE | DT_END_ELLIPSIS | DT_VCENTER);
+         selectedFile, LCD, DT_SINGLELINE | DT_END_ELLIPSIS | DT_VCENTER);
     DrawButtons(dc);
     DrawDelaySlider(dc);
     DrawWave(dc);
-    RECT status{28, h - 66, w - 28, h - 42};
+    RECT status{22, h - 53, w - 22, h - 31};
     Text(dc, g_status, status, MUTED, DT_SINGLELINE | DT_END_ELLIPSIS | DT_VCENTER);
-    RECT tip{28, h - 41, w - 28, h - 10};
+    RECT tip{22, h - 29, w - 22, h - 7};
     std::wstring hint = g_mode == ModeSeek ? L"SEEK ARME : un seul clic sur la waveform deplace la lecture, puis se desactive."
         : g_mode == ModeStart ? L"Cliquez sur la waveform pour placer IN."
         : g_mode == ModeEnd ? L"Cliquez sur la waveform pour placer OUT."
         : g_mode == ModeDelete ? L"DELETE : cliquez sur un repere pour supprimer SANS deplacer la lecture."
         : L"Lecture protegee : activez SEEK pour sauter. Les anciens reperes restent disponibles pour suppression.";
-    Text(dc, hint, tip, RGB(103, 115, 128), DT_SINGLELINE | DT_END_ELLIPSIS);
+    Line(dc, 22, h - 58, w - 22, h - 58, BORDER);
+    Text(dc, hint, tip, MUTED, DT_SINGLELINE | DT_END_ELLIPSIS);
     BitBlt(target, 0, 0, w, h, dc, 0, 0, SRCCOPY);
     SelectObject(dc, previousBmp);
     DeleteObject(bitmap);
@@ -1595,6 +1603,12 @@ void ClickPlot(POINT pt) {
 
 LRESULT CALLBACK WaveWndProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
     switch (message) {
+    case WM_GETMINMAXINFO: {
+        auto* info = reinterpret_cast<MINMAXINFO*>(lparam);
+        info->ptMinTrackSize.x = 760;
+        info->ptMinTrackSize.y = 560;
+        return 0;
+    }
     case WM_CREATE:
         SetTimer(hwnd, TIMER_POLL, 170, nullptr);
         return 0;
@@ -1732,10 +1746,10 @@ static int PluginInit() {
     cls.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     cls.hbrBackground = nullptr;
     if (!RegisterClassExW(&cls)) return 1;
-    g_font = CreateFontW(-15, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+    g_font = CreateFontW(-14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
                          OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
                          DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
-    g_bigFont = CreateFontW(-22, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+    g_bigFont = CreateFontW(-19, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
                             OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
                             DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
     g_hwnd = CreateWindowExW(WS_EX_APPWINDOW, cls.lpszClassName, L"WaveCue - Winamp",
