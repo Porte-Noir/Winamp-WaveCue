@@ -1261,12 +1261,26 @@ void DrawMarker(HDC dc, int64_t ms, COLORREF color, const wchar_t* label, bool l
 }
 
 void DrawWave(HDC dc) {
-    RectFill(dc, g_plot, RGB(13, 18, 22));
-    RectOutline(dc, g_plot, BORDER);
-    RECT inner = g_plot;
-    InflateRect(&inner, -10, -9);
+    // Classic Winamp equalizer: a sunken, dark LCD with a subtle dot grid.
+    RectFill(dc, g_plot, RGB(52, 49, 69));
+    RectOutline(dc, g_plot, RGB(106, 103, 125));
+    RECT bezel{g_plot.left + 2, g_plot.top + 2,
+               g_plot.right - 2, g_plot.bottom - 2};
+    RectFill(dc, bezel, RGB(10, 15, 14));
+    Line(dc, bezel.left, bezel.bottom - 1, bezel.left, bezel.top, RGB(5, 7, 11));
+    Line(dc, bezel.left, bezel.top, bezel.right - 1, bezel.top, RGB(5, 7, 11));
+    Line(dc, bezel.right - 1, bezel.top, bezel.right - 1, bezel.bottom - 1,
+         RGB(67, 64, 81));
+    Line(dc, bezel.right - 1, bezel.bottom - 1, bezel.left, bezel.bottom - 1,
+         RGB(67, 64, 81));
+    RECT inner = bezel;
+    InflateRect(&inner, -8, -7);
     const int cy = (inner.top + inner.bottom) / 2;
-    Line(dc, inner.left, cy, inner.right, cy, RGB(46, 57, 57));
+    // Low-contrast LCD matrix. The waveform pixels use the same 5px pitch.
+    for (int y = inner.top + 2; y < inner.bottom - 1; y += 5)
+        for (int x = inner.left + 2; x < inner.right - 1; x += 5)
+            SetPixelV(dc, x, y, RGB(24, 45, 20));
+    Line(dc, inner.left, cy, inner.right, cy, RGB(32, 54, 27));
     if (!g_wave || g_wave->peaks.empty()) {
         std::wstring msg = g_isLoading
             ? L"ANALYSE EN COURS : " + std::to_wstring(g_progress.load()) + L" %"
@@ -1286,29 +1300,39 @@ void DrawWave(HDC dc) {
         }
         return;
     }
-    int innerW = std::max<int>(1, inner.right - inner.left);
-    int half = std::max<int>(1, (inner.bottom - inner.top) / 2 - 7);
+    const int innerW = std::max<int>(1, inner.right - inner.left);
+    const int half = std::max<int>(1, (inner.bottom - inner.top) / 2 - 7);
     const size_t n = g_wave->peaks.size();
-    // One peak per display pixel. Draw complexity is bounded by window width.
-    HPEN pen = CreatePen(PS_SOLID, 1, ACCENT);
-    HGDIOBJ previous = SelectObject(dc, pen);
-    for (int x = 0; x < innerW; ++x) {
-        size_t a = static_cast<size_t>((static_cast<uint64_t>(x) * n) / innerW);
-        size_t b = std::min(n, static_cast<size_t>((static_cast<uint64_t>(x + 1) * n) / innerW));
+    // Reuse two brushes across the whole display, avoiding GDI allocations
+    // per LCD pixel. Peak aggregation preserves narrow transient spikes.
+    HBRUSH lime = CreateSolidBrush(RGB(83, 222, 37));
+    HBRUSH bright = CreateSolidBrush(RGB(145, 252, 67));
+    for (int px = 0; px < innerW; px += 5) {
+        size_t a = static_cast<size_t>((static_cast<uint64_t>(px) * n) / innerW);
+        size_t b = std::min(n, static_cast<size_t>(
+            (static_cast<uint64_t>(std::min(innerW, px + 5)) * n) / innerW));
         b = std::max(b, a + 1);
         uint16_t maxPeak = 0;
         for (size_t i = a; i < b; ++i) maxPeak = std::max(maxPeak, g_wave->peaks[i]);
-        int amp = std::max(1, static_cast<int>((static_cast<uint64_t>(maxPeak) * half) / 32768));
-        MoveToEx(dc, inner.left + x, cy - amp, nullptr);
-        LineTo(dc, inner.left + x, cy + amp + 1);
+        const int amp = std::max(2, static_cast<int>(
+            (static_cast<uint64_t>(maxPeak) * half) / 32768));
+        const int upper = std::max(inner.top, cy - amp);
+        const int lower = std::min(inner.bottom - 1, cy + amp);
+        const int x = inner.left + px + 1;
+        for (int y = inner.top + 1; y < inner.bottom - 2; y += 5) {
+            const int center = y + 1;
+            if (center < upper || center > lower) continue;
+            RECT pixel{x, y, std::min(x + 3, inner.right - 1), y + 3};
+            FillRect(dc, &pixel, std::abs(center - cy) < half / 3 ? bright : lime);
+        }
     }
-    SelectObject(dc, previous);
-    DeleteObject(pen);
+    DeleteObject(lime);
+    DeleteObject(bright);
 
     if (g_wave->harmonicKey >= 0) {
         RECT keyRect{g_plot.right - 85, g_plot.top + 8, g_plot.right - 10, g_plot.top + 39};
-        RectFill(dc, keyRect, RGB(35, 37, 51));
-        Text(dc, harmonic::Camelot(g_wave->harmonicKey), keyRect, RGB(255, 209, 108),
+        RectFill(dc, keyRect, RGB(24, 29, 27));
+        Text(dc, harmonic::Camelot(g_wave->harmonicKey), keyRect, RGB(191, 249, 109),
              DT_CENTER | DT_VCENTER | DT_SINGLELINE, g_bigFont);
     }
     if (g_cues.start_ms >= 0)
