@@ -88,6 +88,7 @@ HWND g_winamp = nullptr;
 bool g_winampSubclassInstalled = false;
 HFONT g_font = nullptr;
 HFONT g_bigFont = nullptr;
+HBRUSH g_lcdDotBrush = nullptr; // cached Winamp-style LCD background texture
 std::wstring g_dataDir;
 std::wstring g_cacheDir;
 std::wstring g_selectedPath;
@@ -154,6 +155,12 @@ constexpr COLORREF BORDER = RGB(83, 79, 102);
 constexpr COLORREF TEXT = RGB(221, 224, 229);
 constexpr COLORREF MUTED = RGB(155, 156, 174);
 constexpr COLORREF LCD = RGB(124, 225, 66);
+constexpr COLORREF LCD_WAVE = RGB(106, 172, 82); // calmer waveform green
+constexpr COLORREF LCD_DOT = RGB(34, 61, 31); // faint repeatable LCD grid
+constexpr COLORREF LCD_BG = RGB(12, 19, 15);
+constexpr COLORREF LCD_FRAME = RGB(67, 146, 52);
+constexpr COLORREF SECTION_YELLOW = RGB(255, 229, 52);
+constexpr int LCD_DOT_PITCH = 7; // easy to retune; one tiny cached tile
 constexpr COLORREF ACCENT = RGB(111, 199, 186);
 constexpr COLORREF CUE = RGB(220, 182, 103);
 constexpr COLORREF START = RGB(127, 220, 105);
@@ -1260,36 +1267,52 @@ void DrawMarker(HDC dc, int64_t ms, COLORREF color, const wchar_t* label, bool l
     Text(dc, label, tag, color, DT_LEFT | DT_SINGLELINE);
 }
 
+HBRUSH GetLcdDotBrush(HDC dc) {
+    if (g_lcdDotBrush) return g_lcdDotBrush;
+    // Draw only ONE tile, then let GDI repeat it in hardware-optimized FillRect.
+    HDC tileDc = CreateCompatibleDC(dc);
+    if (!tileDc) return nullptr;
+    HBITMAP tile = CreateCompatibleBitmap(dc, LCD_DOT_PITCH, LCD_DOT_PITCH);
+    if (tile) {
+        HGDIOBJ old = SelectObject(tileDc, tile);
+        RECT tileRect{0, 0, LCD_DOT_PITCH, LCD_DOT_PITCH};
+        HBRUSH background = CreateSolidBrush(LCD_BG);
+        FillRect(tileDc, &tileRect, background);
+        DeleteObject(background);
+        SetPixelV(tileDc, 2, 2, LCD_DOT);
+        SelectObject(tileDc, old);
+        g_lcdDotBrush = CreatePatternBrush(tile);
+        DeleteObject(tile);
+    }
+    DeleteDC(tileDc);
+    return g_lcdDotBrush;
+}
+
 void DrawWave(HDC dc) {
-    // Classic Winamp green CRT monitor, GDI-only and lightweight.
-    // One filled background, a few grid lines and a single waveform pen.
-    RectFill(dc, g_plot, RGB(12, 19, 15));
-    RectOutline(dc, g_plot, RGB(62, 165, 48));
+    // Efficient soft green LCD: a cached 7px dot tile, not per-pixel rendering.
+    RectFill(dc, g_plot, LCD_BG);
+    RectOutline(dc, g_plot, LCD_FRAME);
     RECT inner = g_plot;
     InflateRect(&inner, -10, -9);
     const int cy = (inner.top + inner.bottom) / 2;
-    const COLORREF grid = RGB(25, 50, 27);
-    const COLORREF edge = RGB(75, 187, 54);
+    const COLORREF edge = RGB(73, 145, 55);
+    // GDI repeats a tiny bitmap across both waveform windows in one call.
+    if (HBRUSH dots = GetLcdDotBrush(dc)) FillRect(dc, &inner, dots);
     // Recessed outer edge with short calibrated ticks, like Winamp's EQ.
     Line(dc, g_plot.left + 2, g_plot.top + 2, g_plot.right - 3, g_plot.top + 2,
          RGB(21, 56, 25));
     Line(dc, g_plot.left + 2, g_plot.bottom - 3,
          g_plot.right - 3, g_plot.bottom - 3, RGB(21, 56, 25));
-    const int gridX = 32, gridY = 24;
-    for (int x = inner.left + gridX; x < inner.right; x += gridX) {
-        Line(dc, x, inner.top, x, inner.bottom, grid);
+    // Keep only the calibrated frame ticks; the background grid is dotted.
+    for (int x = inner.left + 35; x < inner.right; x += 35) {
         Line(dc, x, g_plot.top + 2, x, g_plot.top + 6, edge);
         Line(dc, x, g_plot.bottom - 7, x, g_plot.bottom - 3, edge);
     }
-    for (int y = cy - gridY; y > inner.top; y -= gridY)
-        Line(dc, inner.left, y, inner.right, y, grid);
-    for (int y = cy + gridY; y < inner.bottom; y += gridY)
-        Line(dc, inner.left, y, inner.right, y, grid);
     for (int y = g_plot.top + 12; y < g_plot.bottom - 8; y += 16) {
         Line(dc, g_plot.left + 2, y, g_plot.left + 6, y, edge);
         Line(dc, g_plot.right - 7, y, g_plot.right - 3, y, edge);
     }
-    Line(dc, inner.left, cy, inner.right, cy, RGB(38, 75, 32));
+    Line(dc, inner.left, cy, inner.right, cy, RGB(38, 67, 33));
     if (!g_wave || g_wave->peaks.empty()) {
         std::wstring msg = g_isLoading
             ? L"ANALYSE EN COURS : " + std::to_wstring(g_progress.load()) + L" %"
@@ -1314,7 +1337,7 @@ void DrawWave(HDC dc) {
     const size_t n = g_wave->peaks.size();
     // Original efficient Winamp WaveCue waveform: one peak per screen pixel,
     // one pen per repaint, no per-cell fill or dense pixel matrix.
-    HPEN pen = CreatePen(PS_SOLID, 1, RGB(100, 232, 45));
+    HPEN pen = CreatePen(PS_SOLID, 1, LCD_WAVE);
     HGDIOBJ previous = SelectObject(dc, pen);
     for (int x = 0; x < innerW; ++x) {
         size_t a = static_cast<size_t>((static_cast<uint64_t>(x) * n) / innerW);
@@ -1417,14 +1440,14 @@ void Paint(HWND hwnd) {
     RECT title{22, 8, 170, 36};
     Text(dc, L"WAVECUE", title, LCD, DT_SINGLELINE | DT_LEFT | DT_VCENTER, g_bigFont);
     RECT playingLabel{22, 45, 174, 74};
-    Text(dc, L"ACTUALLY PLAYING", playingLabel, TEXT, DT_SINGLELINE | DT_VCENTER);
+    Text(dc, L"ACTUALLY PLAYING", playingLabel, SECTION_YELLOW, DT_SINGLELINE | DT_VCENTER);
     RECT playingFile{176, 45, std::max(177, w - 317), 74};
     Text(dc, g_playingPath.empty() ? L"Aucune lecture" : FileLabel(g_playingPath),
          playingFile, LCD, DT_SINGLELINE | DT_END_ELLIPSIS | DT_VCENTER);
     DrawPlayingWave(dc);
     Line(dc, 22, 242, w - 22, 242, BORDER);
     RECT selectedLabel{22, 249, 174, 278};
-    Text(dc, L"SELECTED TRACK", selectedLabel, TEXT, DT_SINGLELINE | DT_VCENTER);
+    Text(dc, L"SELECTED TRACK", selectedLabel, SECTION_YELLOW, DT_SINGLELINE | DT_VCENTER);
     RECT selectedFile{176, 249, w - 22, 278};
     Text(dc, g_selectedPath.empty() ? L"Aucun morceau selectionne" : FileLabel(g_selectedPath),
          selectedFile, LCD, DT_SINGLELINE | DT_END_ELLIPSIS | DT_VCENTER);
@@ -1836,6 +1859,8 @@ static void PluginQuit() {
     g_hwnd = nullptr;
     if (g_font) DeleteObject(g_font);
     if (g_bigFont) DeleteObject(g_bigFont);
+    if (g_lcdDotBrush) DeleteObject(g_lcdDotBrush);
+    g_lcdDotBrush = nullptr;
     g_font = g_bigFont = nullptr;
     UnregisterClassW(L"WinampWaveCueWindow1", g_plugin.hDllInstance);
 }
