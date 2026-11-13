@@ -1316,13 +1316,13 @@ void DrawWave(HDC dc) {
         for (size_t i = a; i < b; ++i) maxPeak = std::max(maxPeak, g_wave->peaks[i]);
         const int amp = std::max(2, static_cast<int>(
             (static_cast<uint64_t>(maxPeak) * half) / 32768));
-        const int upper = std::max(inner.top, cy - amp);
-        const int lower = std::min(inner.bottom - 1, cy + amp);
+        const int upper = std::max<int>(inner.top, cy - amp);
+        const int lower = std::min<int>(inner.bottom - 1, cy + amp);
         const int x = inner.left + px + 1;
         for (int y = inner.top + 1; y < inner.bottom - 2; y += 5) {
             const int center = y + 1;
             if (center < upper || center > lower) continue;
-            RECT pixel{x, y, std::min(x + 3, inner.right - 1), y + 3};
+            RECT pixel{x, y, std::min<int>(x + 3, inner.right - 1), y + 3};
             FillRect(dc, &pixel, std::abs(center - cy) < half / 3 ? bright : lime);
         }
     }
