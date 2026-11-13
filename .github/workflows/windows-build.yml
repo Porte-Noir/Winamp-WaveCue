@@ -37,6 +37,6 @@ jobs:
         run: cmake --build build --config Release
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ github.ref_name == 'main' && 'gen_wavecue-win32' || github.ref_name == 'experimental/winamp-classic-ui' && 'gen_wavecue-winamp-classic-ui' || 'gen_wavecue-camelot-experimental' }}
+          name: ${{ github.ref_name == 'main' && 'gen_wavecue-win32' || github.ref_name == 'experimental/winamp-lcd-waveforms' && 'gen_wavecue-winamp-lcd-waveforms' || github.ref_name == 'experimental/winamp-classic-ui' && 'gen_wavecue-winamp-classic-ui' || 'gen_wavecue-camelot-experimental' }}
           path: build/Release/gen_wavecue.dll
           if-no-files-found: error
