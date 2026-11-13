@@ -1261,26 +1261,35 @@ void DrawMarker(HDC dc, int64_t ms, COLORREF color, const wchar_t* label, bool l
 }
 
 void DrawWave(HDC dc) {
-    // Classic Winamp equalizer: a sunken, dark LCD with a subtle dot grid.
-    RectFill(dc, g_plot, RGB(52, 49, 69));
-    RectOutline(dc, g_plot, RGB(106, 103, 125));
-    RECT bezel{g_plot.left + 2, g_plot.top + 2,
-               g_plot.right - 2, g_plot.bottom - 2};
-    RectFill(dc, bezel, RGB(10, 15, 14));
-    Line(dc, bezel.left, bezel.bottom - 1, bezel.left, bezel.top, RGB(5, 7, 11));
-    Line(dc, bezel.left, bezel.top, bezel.right - 1, bezel.top, RGB(5, 7, 11));
-    Line(dc, bezel.right - 1, bezel.top, bezel.right - 1, bezel.bottom - 1,
-         RGB(67, 64, 81));
-    Line(dc, bezel.right - 1, bezel.bottom - 1, bezel.left, bezel.bottom - 1,
-         RGB(67, 64, 81));
-    RECT inner = bezel;
-    InflateRect(&inner, -8, -7);
+    // Classic Winamp green CRT monitor, GDI-only and lightweight.
+    // One filled background, a few grid lines and a single waveform pen.
+    RectFill(dc, g_plot, RGB(12, 19, 15));
+    RectOutline(dc, g_plot, RGB(62, 165, 48));
+    RECT inner = g_plot;
+    InflateRect(&inner, -10, -9);
     const int cy = (inner.top + inner.bottom) / 2;
-    // Low-contrast LCD matrix. The waveform pixels use the same 5px pitch.
-    for (int y = inner.top + 2; y < inner.bottom - 1; y += 5)
-        for (int x = inner.left + 2; x < inner.right - 1; x += 5)
-            SetPixelV(dc, x, y, RGB(24, 45, 20));
-    Line(dc, inner.left, cy, inner.right, cy, RGB(32, 54, 27));
+    const COLORREF grid = RGB(25, 50, 27);
+    const COLORREF edge = RGB(75, 187, 54);
+    // Recessed outer edge with short calibrated ticks, like Winamp's EQ.
+    Line(dc, g_plot.left + 2, g_plot.top + 2, g_plot.right - 3, g_plot.top + 2,
+         RGB(21, 56, 25));
+    Line(dc, g_plot.left + 2, g_plot.bottom - 3,
+         g_plot.right - 3, g_plot.bottom - 3, RGB(21, 56, 25));
+    const int gridX = 32, gridY = 24;
+    for (int x = inner.left + gridX; x < inner.right; x += gridX) {
+        Line(dc, x, inner.top, x, inner.bottom, grid);
+        Line(dc, x, g_plot.top + 2, x, g_plot.top + 6, edge);
+        Line(dc, x, g_plot.bottom - 7, x, g_plot.bottom - 3, edge);
+    }
+    for (int y = cy - gridY; y > inner.top; y -= gridY)
+        Line(dc, inner.left, y, inner.right, y, grid);
+    for (int y = cy + gridY; y < inner.bottom; y += gridY)
+        Line(dc, inner.left, y, inner.right, y, grid);
+    for (int y = g_plot.top + 12; y < g_plot.bottom - 8; y += 16) {
+        Line(dc, g_plot.left + 2, y, g_plot.left + 6, y, edge);
+        Line(dc, g_plot.right - 7, y, g_plot.right - 3, y, edge);
+    }
+    Line(dc, inner.left, cy, inner.right, cy, RGB(38, 75, 32));
     if (!g_wave || g_wave->peaks.empty()) {
         std::wstring msg = g_isLoading
             ? L"ANALYSE EN COURS : " + std::to_wstring(g_progress.load()) + L" %"
@@ -1303,31 +1312,24 @@ void DrawWave(HDC dc) {
     const int innerW = std::max<int>(1, inner.right - inner.left);
     const int half = std::max<int>(1, (inner.bottom - inner.top) / 2 - 7);
     const size_t n = g_wave->peaks.size();
-    // Reuse two brushes across the whole display, avoiding GDI allocations
-    // per LCD pixel. Peak aggregation preserves narrow transient spikes.
-    HBRUSH lime = CreateSolidBrush(RGB(83, 222, 37));
-    HBRUSH bright = CreateSolidBrush(RGB(145, 252, 67));
-    for (int px = 0; px < innerW; px += 5) {
-        size_t a = static_cast<size_t>((static_cast<uint64_t>(px) * n) / innerW);
+    // Original efficient Winamp WaveCue waveform: one peak per screen pixel,
+    // one pen per repaint, no per-cell fill or dense pixel matrix.
+    HPEN pen = CreatePen(PS_SOLID, 1, RGB(100, 232, 45));
+    HGDIOBJ previous = SelectObject(dc, pen);
+    for (int x = 0; x < innerW; ++x) {
+        size_t a = static_cast<size_t>((static_cast<uint64_t>(x) * n) / innerW);
         size_t b = std::min(n, static_cast<size_t>(
-            (static_cast<uint64_t>(std::min(innerW, px + 5)) * n) / innerW));
+            (static_cast<uint64_t>(x + 1) * n) / innerW));
         b = std::max(b, a + 1);
         uint16_t maxPeak = 0;
         for (size_t i = a; i < b; ++i) maxPeak = std::max(maxPeak, g_wave->peaks[i]);
-        const int amp = std::max(2, static_cast<int>(
+        int amp = std::max(1, static_cast<int>(
             (static_cast<uint64_t>(maxPeak) * half) / 32768));
-        const int upper = std::max<int>(inner.top, cy - amp);
-        const int lower = std::min<int>(inner.bottom - 1, cy + amp);
-        const int x = inner.left + px + 1;
-        for (int y = inner.top + 1; y < inner.bottom - 2; y += 5) {
-            const int center = y + 1;
-            if (center < upper || center > lower) continue;
-            RECT pixel{x, y, std::min<int>(x + 3, inner.right - 1), y + 3};
-            FillRect(dc, &pixel, std::abs(center - cy) < half / 3 ? bright : lime);
-        }
+        MoveToEx(dc, inner.left + x, cy - amp, nullptr);
+        LineTo(dc, inner.left + x, cy + amp + 1);
     }
-    DeleteObject(lime);
-    DeleteObject(bright);
+    SelectObject(dc, previous);
+    DeleteObject(pen);
 
     if (g_wave->harmonicKey >= 0) {
         RECT keyRect{g_plot.right - 85, g_plot.top + 8, g_plot.right - 10, g_plot.top + 39};
