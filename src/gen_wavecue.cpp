@@ -1500,9 +1500,9 @@ void DrawWave(HDC dc) {
 
     if (g_wave->bpm >= 80) {
         RECT bpmRect{g_plot.left + 10, g_plot.top + 8,
-                     g_plot.left + 105, g_plot.top + 39};
+                     g_plot.left + 74, g_plot.top + 39};
         RectFill(dc, bpmRect, RGB(22, 23, 29));
-        Text(dc, std::to_wstring(g_wave->bpm) + L" BPM", bpmRect,
+        Text(dc, std::to_wstring(g_wave->bpm), bpmRect,
              RGB(239, 216, 105), DT_CENTER | DT_VCENTER | DT_SINGLELINE, g_bigFont);
     }
     if (g_wave->harmonicKey >= 0) {
