@@ -126,6 +126,7 @@ struct WaveData {
     double rmsDisplayGain = 1.0; // visual scaling only; never affects audio
     int harmonicKey = -2; // -2 unknown; -1 uncertain; 0..23 pitch class + mode
     int bpm = -1; // experimental BTrack result; -1 uncertain
+    bool bpmDouble = false; // persisted per track; UI only
 };
 std::shared_ptr<WaveData> g_wave;
 std::shared_ptr<WaveData> g_playingWave;
@@ -338,6 +339,27 @@ static_assert(sizeof(CacheHeader) == 44, "Cache header must be stable");
 constexpr uint32_t CACHE_MAGIC = 0x45554357u;
 constexpr uint32_t RMS_CACHE_VERSION = 5; // BPM enabled, re-analyze constructor-only diagnostic caches
 
+// Keep each track's normal/fast display preference independent from analysis.
+std::wstring BpmChoicePath(const std::wstring& path) { return CachePath(path) + L".fast"; }
+bool ReadBpmChoice(const std::wstring& path) {
+    FILE* f = nullptr;
+    if (path.empty() || _wfopen_s(&f, BpmChoicePath(path).c_str(), L"rb") != 0 || !f)
+        return false;
+    const int c = fgetc(f);
+    fclose(f);
+    return c == '1';
+}
+void WriteBpmChoice(const std::wstring& path, bool doubled) {
+    if (path.empty()) return;
+    const std::wstring dest = BpmChoicePath(path);
+    const std::wstring temp = dest + L".tmp";
+    FILE* f = nullptr;
+    if (_wfopen_s(&f, temp.c_str(), L"wb") != 0 || !f) return;
+    const bool ok = fputc(doubled ? '1' : '0', f) != EOF && fclose(f) == 0;
+    if (!ok || !MoveFileExW(temp.c_str(), dest.c_str(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+        DeleteFileW(temp.c_str());
+}
 std::wstring KeyCachePath(const std::wstring& path) { return CachePath(path) + L".key"; }
 int ReadKeyCache(const Task& task) {
     FILE* f = nullptr;
@@ -450,6 +472,7 @@ std::shared_ptr<WaveData> LoadCache(const Task& task) {
     auto wave = std::make_shared<WaveData>();
     wave->duration_ms = hdr.duration_ms;
     wave->bpm = hdr.bpm >= 80 && hdr.bpm <= 160 ? hdr.bpm : -1;
+    wave->bpmDouble = ReadBpmChoice(task.path);
     wave->peaks.resize(hdr.peak_count);
     if (fread(wave->peaks.data(), sizeof(uint16_t), hdr.peak_count, f) != hdr.peak_count) {
         fclose(f);
@@ -955,6 +978,7 @@ void WorkerMain() {
             // BTrack class ABI is consistent across the plugin and static library.
             // Run the experimental BPM estimator after decoding on the worker thread.
             result->wave->bpm = EstimateBpmFromRms(*result->wave, task);
+            result->wave->bpmDouble = ReadBpmChoice(task.path);
             if (TaskCurrent(task)) SaveCache(task, *result->wave);
         }
         if (!TaskCurrent(task)) continue;
@@ -1502,7 +1526,7 @@ void DrawWave(HDC dc) {
         RECT bpmRect{g_plot.left + 10, g_plot.top + 8,
                      g_plot.left + 74, g_plot.top + 39};
         RectFill(dc, bpmRect, RGB(22, 23, 29));
-        Text(dc, std::to_wstring(g_wave->bpm), bpmRect,
+        Text(dc, std::to_wstring(g_wave->bpm * (g_wave->bpmDouble ? 2 : 1)), bpmRect,
              RGB(239, 216, 105), DT_CENTER | DT_VCENTER | DT_SINGLELINE, g_bigFont);
     }
     if (g_wave->harmonicKey >= 0) {
@@ -1753,6 +1777,31 @@ void ActivateButton(int id) {
     InvalidateRect(g_hwnd, nullptr, FALSE);
 }
 
+// The tempo badge is interactive in either panel. It never triggers seek
+// or cue editing, and the chosen half/double-time view is saved per song.
+bool ClickBpmBadge(POINT pt) {
+    const bool selected = PtInRect(&g_plot, pt) != 0;
+    const bool playing = PtInRect(&g_playingPlot, pt) != 0;
+    if (!selected && !playing) return false;
+    const RECT& plot = selected ? g_plot : g_playingPlot;
+    std::shared_ptr<WaveData> wave = selected ? g_wave : g_playingWave;
+    const std::wstring& path = selected ? g_selectedPath : g_playingPath;
+    if (!wave || wave->bpm < 80 || path.empty()) return false;
+    RECT badge{plot.left + 10, plot.top + 8, plot.left + 74, plot.top + 39};
+    if (!PtInRect(&badge, pt)) return false;
+    wave->bpmDouble = !wave->bpmDouble;
+    WriteBpmChoice(path, wave->bpmDouble);
+    if (g_wave && _wcsicmp(path.c_str(), g_selectedPath.c_str()) == 0)
+        g_wave->bpmDouble = wave->bpmDouble;
+    if (g_playingWave && _wcsicmp(path.c_str(), g_playingPath.c_str()) == 0)
+        g_playingWave->bpmDouble = wave->bpmDouble;
+    g_status = wave->bpmDouble ? L"Tempo rapide memorise (x2)." :
+                                 L"Tempo normal memorise.";
+    InvalidateRect(g_hwnd, &g_plot, FALSE);
+    InvalidateRect(g_hwnd, &g_playingPlot, FALSE);
+    return true;
+}
+
 void ClickPlot(POINT pt) {
     if (!g_wave || !IsInPlot(pt)) return;
     const int64_t ms = MsAt(pt.x);
@@ -1838,6 +1887,7 @@ LRESULT CALLBACK WaveWndProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
         SetFocus(hwnd);
         int button = ButtonUnder(pt);
         if (button) ActivateButton(button);
+        else if (ClickBpmBadge(pt)) return 0;
         else if (InDelaySlider(pt)) {
             g_delayDragging = true;
             SetCapture(hwnd);
