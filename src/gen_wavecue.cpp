@@ -355,7 +355,8 @@ void WriteBpmChoice(const std::wstring& path, bool doubled) {
     const std::wstring temp = dest + L".tmp";
     FILE* f = nullptr;
     if (_wfopen_s(&f, temp.c_str(), L"wb") != 0 || !f) return;
-    const bool ok = fputc(doubled ? '1' : '0', f) != EOF && fclose(f) == 0;
+    bool ok = fputc(doubled ? '1' : '0', f) != EOF;
+    if (fclose(f) != 0) ok = false;
     if (!ok || !MoveFileExW(temp.c_str(), dest.c_str(),
             MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
         DeleteFileW(temp.c_str());
