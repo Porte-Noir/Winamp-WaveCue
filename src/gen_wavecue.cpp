@@ -29,6 +29,7 @@
 #include <vector>
 #include "core.hpp"
 #include "harmonic_probe.hpp"
+#include "BTrack.h"
 #define DR_FLAC_IMPLEMENTATION
 #include "dr_flac.h"
 // Ogg Vorbis, decoded in the background without changing Winamp playback.
@@ -124,6 +125,7 @@ struct WaveData {
     std::vector<uint16_t> rms; // 50ms loudness envelope
     double rmsDisplayGain = 1.0; // visual scaling only; never affects audio
     int harmonicKey = -2; // -2 unknown; -1 uncertain; 0..23 pitch class + mode
+    int bpm = -1; // experimental BTrack result; -1 uncertain
 };
 std::shared_ptr<WaveData> g_wave;
 std::shared_ptr<WaveData> g_playingWave;
@@ -329,11 +331,12 @@ struct CacheHeader {
     uint64_t duration_ms;
     uint32_t interval_ms;
     uint32_t peak_count;
+    int32_t bpm; // cache v3: BPM stored directly with waveform, no legacy migration
 };
 #pragma pack(pop)
-static_assert(sizeof(CacheHeader) == 40, "Cache header must be stable");
+static_assert(sizeof(CacheHeader) == 44, "Cache header must be stable");
 constexpr uint32_t CACHE_MAGIC = 0x45554357u;
-constexpr uint32_t RMS_CACHE_VERSION = 2; // discard peak-only v1 waveform cache
+constexpr uint32_t RMS_CACHE_VERSION = 3; // deliberately rebuild v2: includes experimental BPM
 
 std::wstring KeyCachePath(const std::wstring& path) { return CachePath(path) + L".key"; }
 int ReadKeyCache(const Task& task) {
@@ -386,6 +389,41 @@ void SetRmsDisplayGain(WaveData& wave) {
         : 1.0;
 }
 
+// Experimental BTrack BPM analysis using the existing 50ms RMS envelope.
+// BTrack's internal tempo mathematics assumes 44.1kHz: hop 2205 = 50ms.
+// Analyze a maximum of 90 seconds starting at 1:00, avoiding intros.
+// The result is limited to BTrack's conventional 80-160 BPM range.
+int EstimateBpmFromRms(const WaveData& wave, const Task& task) {
+    constexpr size_t startBin = 60 * 20;
+    constexpr size_t durationBins = 90 * 20;
+    if (wave.rms.size() < startBin + 20 * 15) return -1;
+    BTrack tracker(2205, 4410);
+    const size_t stop = std::min(wave.rms.size(), startBin + durationBins);
+    double last = static_cast<double>(wave.rms[startBin - 1]) / 32768.0;
+    double slow = last;
+    std::vector<double> tempos;
+    tempos.reserve(durationBins / 20);
+    for (size_t i = startBin; i < stop && TaskCurrent(task); ++i) {
+        const double energy = static_cast<double>(wave.rms[i]) / 32768.0;
+        slow += 0.10 * (energy - slow);
+        // Positive envelope derivative: a low-cost onset-function proxy.
+        const double onset = std::max(0.0, energy - last) +
+                             0.25 * std::max(0.0, energy - slow);
+        tracker.processOnsetDetectionFunctionSample(onset);
+        last = energy;
+        if (i >= startBin + 20 * 12 && (i - startBin) % 20 == 0) {
+            const double tempo = tracker.getCurrentTempoEstimate();
+            if (std::isfinite(tempo) && tempo >= 80 && tempo <= 160)
+                tempos.push_back(tempo);
+        }
+    }
+    if (!TaskCurrent(task) || tempos.size() < 5) return -1;
+    const auto median = tempos.begin() + tempos.size() / 2;
+    std::nth_element(tempos.begin(), median, tempos.end());
+    const int bpm = static_cast<int>(std::lround(*median));
+    return bpm >= 80 && bpm <= 160 ? bpm : -1;
+}
+
 std::shared_ptr<WaveData> LoadCache(const Task& task) {
     FILE* f = nullptr;
     if (_wfopen_s(&f, CachePath(task.path).c_str(), L"rb") != 0 || !f) return {};
@@ -399,6 +437,7 @@ std::shared_ptr<WaveData> LoadCache(const Task& task) {
     }
     auto wave = std::make_shared<WaveData>();
     wave->duration_ms = hdr.duration_ms;
+    wave->bpm = hdr.bpm >= 80 && hdr.bpm <= 160 ? hdr.bpm : -1;
     wave->peaks.resize(hdr.peak_count);
     if (fread(wave->peaks.data(), sizeof(uint16_t), hdr.peak_count, f) != hdr.peak_count) {
         fclose(f);
@@ -425,7 +464,7 @@ void SaveCache(const Task& task, const WaveData& wave) {
     FILE* f = nullptr;
     if (_wfopen_s(&f, temp.c_str(), L"wb") != 0 || !f) return;
     CacheHeader hdr{CACHE_MAGIC, RMS_CACHE_VERSION, current.size, current.modified,
-                    wave.duration_ms, 50, static_cast<uint32_t>(wave.peaks.size())};
+                    wave.duration_ms, 50, static_cast<uint32_t>(wave.peaks.size()), wave.bpm};
     bool ok = fwrite(&hdr, sizeof hdr, 1, f) == 1 &&
         fwrite(wave.peaks.data(), sizeof(uint16_t), wave.peaks.size(), f) == wave.peaks.size() &&
         fwrite(wave.rms.data(), sizeof(uint16_t), wave.rms.size(), f) == wave.rms.size();
@@ -900,7 +939,10 @@ void WorkerMain() {
         else if (mfReady) result->wave = DecodeWithMF(task, result->error);
         else result->error = L"Windows Media Foundation n'est pas disponible.";
         if (!TaskCurrent(task)) continue;
-        if (result->wave) SaveCache(task, *result->wave);
+        if (result->wave) {
+            result->wave->bpm = EstimateBpmFromRms(*result->wave, task);
+            if (TaskCurrent(task)) SaveCache(task, *result->wave);
+        }
         if (!TaskCurrent(task)) continue;
         {
             std::lock_guard<std::mutex> lk(g_taskMutex);
@@ -1442,6 +1484,13 @@ void DrawWave(HDC dc) {
     SelectObject(dc, previous);
     DeleteObject(pen);
 
+    if (g_wave->bpm >= 80) {
+        RECT bpmRect{g_plot.left + 10, g_plot.top + 8,
+                     g_plot.left + 105, g_plot.top + 39};
+        RectFill(dc, bpmRect, RGB(22, 23, 29));
+        Text(dc, std::to_wstring(g_wave->bpm) + L" BPM", bpmRect,
+             RGB(239, 216, 105), DT_CENTER | DT_VCENTER | DT_SINGLELINE, g_bigFont);
+    }
     if (g_wave->harmonicKey >= 0) {
         RECT keyRect{g_plot.right - 85, g_plot.top + 8, g_plot.right - 10, g_plot.top + 39};
         RectFill(dc, keyRect, RGB(22, 23, 29));
