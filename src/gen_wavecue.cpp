@@ -121,6 +121,7 @@ std::wstring g_status = L"Selectionnez un morceau dans la playlist de Winamp.";
 struct WaveData {
     uint64_t duration_ms = 0;
     std::vector<uint16_t> peaks;
+    std::vector<uint16_t> rms; // 50ms loudness envelope
     int harmonicKey = -2; // -2 unknown; -1 uncertain; 0..23 pitch class + mode
 };
 std::shared_ptr<WaveData> g_wave;
@@ -155,11 +156,11 @@ constexpr COLORREF BORDER = RGB(83, 79, 102);
 constexpr COLORREF TEXT = RGB(221, 224, 229);
 constexpr COLORREF MUTED = RGB(155, 156, 174);
 constexpr COLORREF LCD = RGB(124, 225, 66);
-constexpr COLORREF LCD_WAVE = RGB(51, 158, 68); // vivid forest green, brighter than natural foliage
-constexpr COLORREF LCD_DOT = RGB(34, 61, 31); // faint repeatable LCD grid
-constexpr COLORREF LCD_BG = RGB(12, 19, 15);
-constexpr COLORREF LCD_FRAME = RGB(67, 146, 52);
-constexpr COLORREF SECTION_YELLOW = RGB(255, 229, 52);
+constexpr COLORREF LCD_WAVE = RGB(111, 199, 186); // original cyan
+constexpr COLORREF LCD_DOT = RGB(27, 29, 33); // faint neutral dotted grid
+constexpr COLORREF LCD_BG = RGB(0, 0, 0); // pure black
+constexpr COLORREF LCD_FRAME = RGB(139, 142, 155); // light gray steel
+constexpr COLORREF SECTION_YELLOW = RGB(239, 216, 105);
 constexpr int LCD_DOT_PITCH = 7; // easy to retune; one tiny cached tile
 constexpr COLORREF ACCENT = RGB(111, 199, 186);
 constexpr COLORREF CUE = RGB(220, 182, 103);
@@ -331,6 +332,7 @@ struct CacheHeader {
 #pragma pack(pop)
 static_assert(sizeof(CacheHeader) == 40, "Cache header must be stable");
 constexpr uint32_t CACHE_MAGIC = 0x45554357u;
+constexpr uint32_t RMS_CACHE_VERSION = 2; // discard peak-only v1 waveform cache
 
 std::wstring KeyCachePath(const std::wstring& path) { return CachePath(path) + L".key"; }
 int ReadKeyCache(const Task& task) {
@@ -370,7 +372,7 @@ std::shared_ptr<WaveData> LoadCache(const Task& task) {
     if (_wfopen_s(&f, CachePath(task.path).c_str(), L"rb") != 0 || !f) return {};
     CacheHeader hdr{};
     if (fread(&hdr, sizeof hdr, 1, f) != 1 || hdr.magic != CACHE_MAGIC ||
-        hdr.version != 1 || hdr.file_size != task.stamp.size ||
+        hdr.version != RMS_CACHE_VERSION || hdr.file_size != task.stamp.size ||
         hdr.last_write != task.stamp.modified || hdr.interval_ms != 50 ||
         hdr.peak_count == 0 || hdr.peak_count > 1000000 || hdr.duration_ms == 0) {
         fclose(f);
@@ -383,28 +385,60 @@ std::shared_ptr<WaveData> LoadCache(const Task& task) {
         fclose(f);
         return {};
     }
+    wave->rms.resize(hdr.peak_count);
+    if (fread(wave->rms.data(), sizeof(uint16_t), hdr.peak_count, f) != hdr.peak_count) {
+        fclose(f);
+        return {};
+    }
     fclose(f);
     wave->harmonicKey = ReadKeyCache(task);
     return wave;
 }
 
 void SaveCache(const Task& task, const WaveData& wave) {
-    if (wave.peaks.empty() || wave.peaks.size() > 1000000) return;
+    if (wave.peaks.empty() || wave.peaks.size() > 1000000 ||
+        wave.rms.size() != wave.peaks.size()) return;
     FileStamp current{};
     if (!ReadFileStamp(task.path, current) || current.size != task.stamp.size ||
         current.modified != task.stamp.modified) return;
     std::wstring dest = CachePath(task.path), temp = dest + L".tmp";
     FILE* f = nullptr;
     if (_wfopen_s(&f, temp.c_str(), L"wb") != 0 || !f) return;
-    CacheHeader hdr{CACHE_MAGIC, 1, current.size, current.modified,
+    CacheHeader hdr{CACHE_MAGIC, RMS_CACHE_VERSION, current.size, current.modified,
                     wave.duration_ms, 50, static_cast<uint32_t>(wave.peaks.size())};
     bool ok = fwrite(&hdr, sizeof hdr, 1, f) == 1 &&
-        fwrite(wave.peaks.data(), sizeof(uint16_t), wave.peaks.size(), f) == wave.peaks.size();
+        fwrite(wave.peaks.data(), sizeof(uint16_t), wave.peaks.size(), f) == wave.peaks.size() &&
+        fwrite(wave.rms.data(), sizeof(uint16_t), wave.rms.size(), f) == wave.rms.size();
     if (fclose(f) != 0) ok = false;
     if (!ok || !MoveFileExW(temp.c_str(), dest.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
         DeleteFileW(temp.c_str());
     else if (wave.harmonicKey >= -1) WriteKeyCache(task, wave.harmonicKey);
 }
+
+// Streaming 50ms RMS calculated once on the decode thread, then cached.
+struct RmsAccumulator {
+    size_t bucket = 0;
+    double sumSquares = 0.0;
+    uint64_t count = 0;
+    void Flush(WaveData& wave) {
+        if (!count) return;
+        if (bucket >= wave.rms.size()) wave.rms.resize(bucket + 1, 0);
+        const double amplitude = std::sqrt(sumSquares / static_cast<double>(count));
+        wave.rms[bucket] = static_cast<uint16_t>(
+            std::min(32767.0, std::max(0.0, amplitude * 32767.0)));
+    }
+    void Add(WaveData& wave, size_t bin, double normalizedMono) {
+        if (count && bin != bucket) {
+            Flush(wave);
+            sumSquares = 0.0;
+            count = 0;
+        }
+        bucket = bin;
+        if (!std::isfinite(normalizedMono)) normalizedMono = 0.0;
+        sumSquares += normalizedMono * normalizedMono;
+        ++count;
+    }
+};
 
 // Native FLAC decoding, independent of Windows codecs; background and cache-aware.
 std::shared_ptr<WaveData> DecodeFlac(const Task& task, std::wstring& error) {
@@ -418,6 +452,7 @@ std::shared_ptr<WaveData> DecodeFlac(const Task& task, std::wstring& error) {
     std::vector<drflac_int16> samples(static_cast<size_t>(CHUNK) * channels);
     auto wave = std::make_shared<WaveData>();
     harmonic::Probe harmonicProbe(static_cast<int>(rate));
+    RmsAccumulator rms;
     const uint64_t bucketFrames = std::max<uint32_t>(1, rate / 20);
     uint64_t frameCount = 0;
     while (TaskCurrent(task)) {
@@ -437,6 +472,7 @@ std::shared_ptr<WaveData> DecodeFlac(const Task& task, std::wstring& error) {
             wave->peaks[bin] = static_cast<uint16_t>(std::max<int>(
                 wave->peaks[bin], std::min(maximum, 32767)));
             harmonicProbe.Add(static_cast<float>(mixed / (32768.0 * channels)));
+            rms.Add(*wave, bin, mixed / (32768.0 * channels));
         }
         if (!error.empty()) break;
         if (flac->totalPCMFrameCount > 0)
@@ -480,6 +516,7 @@ std::shared_ptr<WaveData> DecodeOgg(const Task& task, std::wstring& error) {
     std::vector<short> samples(static_cast<size_t>(chunkFrames) * channels);
     auto wave = std::make_shared<WaveData>();
     harmonic::Probe harmonicProbe(rate);
+    RmsAccumulator rms;
     const uint64_t bucketFrames = std::max<uint32_t>(1, static_cast<uint32_t>(rate) / 20);
     const uint64_t expectedFrames = stb_vorbis_stream_length_in_samples(vorbis);
     uint64_t frames = 0;
@@ -501,6 +538,7 @@ std::shared_ptr<WaveData> DecodeOgg(const Task& task, std::wstring& error) {
             wave->peaks[bin] = static_cast<uint16_t>(
                 std::max<int>(wave->peaks[bin], std::min(peak, 32767)));
             harmonicProbe.Add(static_cast<float>(mixed / (32768.0 * channels)));
+            rms.Add(*wave, bin, mixed / (32768.0 * channels));
         }
         if (!error.empty()) break;
         if (expectedFrames > 0 && !task.playing)
@@ -624,6 +662,7 @@ std::shared_ptr<WaveData> DecodeAiff(const Task& task, std::wstring& error) {
     std::vector<unsigned char> samples(chunkFrames * static_cast<size_t>(frameBytes));
     auto wave = std::make_shared<WaveData>();
     harmonic::Probe harmonicProbe(rate);
+    RmsAccumulator rms;
     uint64_t frames = 0;
     while (TaskCurrent(task) && frames < totalFrames) {
         const size_t count = static_cast<size_t>(
@@ -679,6 +718,7 @@ std::shared_ptr<WaveData> DecodeAiff(const Task& task, std::wstring& error) {
             wave->peaks[bin] = static_cast<uint16_t>(
                 std::max<int>(wave->peaks[bin], peak));
             harmonicProbe.Add(static_cast<float>(mixed / channels));
+            rms.Add(*wave, bin, mixed / channels);
         }
         if (!error.empty()) break;
         if (!task.playing)
@@ -723,6 +763,7 @@ std::shared_ptr<WaveData> DecodeWithMF(const Task& task, std::wstring& error) {
     } else {
         wave = std::make_shared<WaveData>();
         harmonic::Probe harmonicProbe(static_cast<int>(rate));
+    RmsAccumulator rms;
         const uint64_t bucketFrames = std::max<UINT32>(1, rate / 20); // ~50 ms
         uint64_t frameCount = 0;
         uint64_t estimatedFrames = 0;
@@ -767,6 +808,7 @@ std::shared_ptr<WaveData> DecodeWithMF(const Task& task, std::wstring& error) {
                             wave->peaks[bin] = static_cast<uint16_t>(
                                 std::max<int>(wave->peaks[bin], std::min(maximum, 32767)));
                             harmonicProbe.Add(static_cast<float>(mixed / (32768.0 * channels)));
+            rms.Add(*wave, bin, mixed / (32768.0 * channels));
                         }
                         buffer->Unlock();
                         if (!error.empty()) wave.reset();
