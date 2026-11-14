@@ -336,7 +336,7 @@ struct CacheHeader {
 #pragma pack(pop)
 static_assert(sizeof(CacheHeader) == 44, "Cache header must be stable");
 constexpr uint32_t CACHE_MAGIC = 0x45554357u;
-constexpr uint32_t RMS_CACHE_VERSION = 3; // deliberately rebuild v2: includes experimental BPM
+constexpr uint32_t RMS_CACHE_VERSION = 4; // constructor-only diagnostic: force regeneration // deliberately rebuild v2: includes experimental BPM
 
 std::wstring KeyCachePath(const std::wstring& path) { return CachePath(path) + L".key"; }
 int ReadKeyCache(const Task& task) {
