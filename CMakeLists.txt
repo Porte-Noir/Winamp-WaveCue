@@ -17,10 +17,21 @@ endif()
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
 add_subdirectory(third_party/libkeyfinder)
+# BTrack GPLv3, pinned and fetched by the Windows CI. FFTW is reused from
+# libKeyFinder, while libsamplerate is statically linked for the 32-bit target.
+add_library(wavecue_btrack STATIC
+  third_party/BTrack/src/BTrack.cpp
+  third_party/BTrack/src/OnsetDetectionFunction.cpp)
+target_include_directories(wavecue_btrack PUBLIC
+  third_party/BTrack/src ${FFTW3_INCLUDE_DIR}
+  ${LIBSAMPLERATE_INCLUDE_DIR})
+target_compile_definitions(wavecue_btrack PRIVATE USE_FFTW _USE_MATH_DEFINES)
+target_link_libraries(wavecue_btrack PUBLIC
+  ${FFTW3_LIBRARY} ${LIBSAMPLERATE_LIBRARY})
 add_library(gen_wavecue SHARED src/gen_wavecue.cpp)
 target_compile_features(gen_wavecue PRIVATE cxx_std_17)
 target_compile_definitions(gen_wavecue PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX WINVER=0x0601 _WIN32_WINNT=0x0601)
-target_link_libraries(gen_wavecue PRIVATE mfplat mfreadwrite mfuuid ole32 shell32 gdi32 user32 comctl32 keyfinder)
+target_link_libraries(gen_wavecue PRIVATE mfplat mfreadwrite mfuuid ole32 shell32 gdi32 user32 comctl32 keyfinder wavecue_btrack)
 if(MSVC)
   target_compile_options(gen_wavecue PRIVATE /W4 /EHsc /utf-8)
 endif()
