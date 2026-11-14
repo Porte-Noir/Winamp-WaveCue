@@ -952,7 +952,9 @@ void WorkerMain() {
         else result->error = L"Windows Media Foundation n'est pas disponible.";
         if (!TaskCurrent(task)) continue;
         if (result->wave) {
-            result->wave->bpm = EstimateBpmFromRms(*result->wave, task);
+            // Diagnostic only: BTrack remains linked but its analysis is bypassed.
+            // If Winamp stays stable, the crash is in the BPM execution path.
+            result->wave->bpm = -1;
             if (TaskCurrent(task)) SaveCache(task, *result->wave);
         }
         if (!TaskCurrent(task)) continue;
