@@ -25,7 +25,9 @@ add_library(wavecue_btrack STATIC
 target_include_directories(wavecue_btrack PUBLIC
   third_party/BTrack/src ${FFTW3_INCLUDE_DIR}
   ${LIBSAMPLERATE_INCLUDE_DIR})
-target_compile_definitions(wavecue_btrack PRIVATE USE_FFTW _USE_MATH_DEFINES)
+# BTrack.h conditionally adds FFTW pointers to its class layout.
+# Consumers must see the same definition to avoid heap corruption.
+target_compile_definitions(wavecue_btrack PUBLIC USE_FFTW PRIVATE _USE_MATH_DEFINES)
 target_link_libraries(wavecue_btrack PUBLIC
   ${FFTW3_LIBRARY} ${LIBSAMPLERATE_LIBRARY})
 add_library(gen_wavecue SHARED src/gen_wavecue.cpp)
