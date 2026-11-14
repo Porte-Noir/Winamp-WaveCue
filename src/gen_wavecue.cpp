@@ -954,6 +954,12 @@ void WorkerMain() {
         if (result->wave) {
             // Diagnostic only: BTrack remains linked but its analysis is bypassed.
             // If Winamp stays stable, the crash is in the BPM execution path.
+            // Constructor-only diagnostic: initialize FFTW/BTrack internals
+            // but never feed frames or compute tempo.
+            if (result->wave->rms.size() > 60 * 20 + 15 * 20 && TaskCurrent(task)) {
+                BTrack probe(512, 1024);
+                (void)probe.getCurrentTempoEstimate();
+            }
             result->wave->bpm = -1;
             if (TaskCurrent(task)) SaveCache(task, *result->wave);
         }
