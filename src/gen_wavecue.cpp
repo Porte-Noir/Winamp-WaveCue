@@ -373,9 +373,16 @@ bool TaskCurrent(const Task& task) {
 // Cap gain so almost-silent files and residual noise stay quiet.
 void SetRmsDisplayGain(WaveData& wave) {
     if (wave.rms.empty()) { wave.rmsDisplayGain = 1.0; return; }
-    const auto loudest = *std::max_element(wave.rms.begin(), wave.rms.end());
-    wave.rmsDisplayGain = loudest
-        ? std::max(1.0, std::min(3.0, (32767.0 * 0.86) / loudest))
+    // The upper percentile represents the actual body of the track rather
+    // than a single loud transient. Once per load; no extra work on repaint.
+    std::vector<uint16_t> levels = wave.rms;
+    const size_t position = (levels.size() - 1) * 90 / 100;
+    std::nth_element(levels.begin(), levels.begin() + position, levels.end());
+    const uint16_t reference = levels[position];
+    // Allow up to 8x for quieter masters. Cap displayed heights at the panel
+    // boundary; silence stays silent and the audio itself is untouched.
+    wave.rmsDisplayGain = reference
+        ? std::max(1.0, std::min(8.0, (32767.0 * 0.92) / reference))
         : 1.0;
 }
 
@@ -950,8 +957,23 @@ void ChangeSelected(int index, const std::wstring& path) {
     g_marker = MarkerNone;
     g_markerIndex = -1;
     g_dragging = false;
-    if (path.empty()) g_status = L"Selectionnez un titre dans le Playlist Editor.";
-    else g_status = L"Waveform vide. Cliquez sur Show/Load Waveform.";
+    if (path.empty()) {
+        g_status = L"Selectionnez un titre dans le Playlist Editor.";
+    } else {
+        // Playlist browsing is read-only: show previously analysed waveform
+        // and Camelot key immediately, without starting a new decoder task.
+        FileStamp stamp{};
+        if (ReadFileStamp(path, stamp)) {
+            Task cacheTask{path, stamp, g_generation.load(), false};
+            g_wave = LoadCache(cacheTask);
+        }
+        if (g_wave)
+            g_status = g_wave->harmonicKey >= -1
+                ? L"Waveform et tonalite lues depuis le cache."
+                : L"Waveform en cache. Cliquez sur Load pour calculer la tonalite.";
+        else
+            g_status = L"Waveform vide. Cliquez sur Show/Load Waveform.";
+    }
     RefreshButtonLayout();
     InvalidateRect(g_hwnd, nullptr, FALSE);
 }
