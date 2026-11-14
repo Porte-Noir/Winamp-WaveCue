@@ -395,23 +395,35 @@ void SetRmsDisplayGain(WaveData& wave) {
 // The result is limited to BTrack's conventional 80-160 BPM range.
 int EstimateBpmFromRms(const WaveData& wave, const Task& task) {
     constexpr size_t startBin = 60 * 20;
-    constexpr size_t durationBins = 90 * 20;
+    constexpr size_t durationBins = 60 * 20;
+    // RMS is sampled each 50ms; BTrack itself expects a 512-sample hop at
+    // 44.1kHz (~11.6ms), so interpolate the low-resolution envelope.
     if (wave.rms.size() < startBin + 20 * 15) return -1;
-    BTrack tracker(2205, 4410);
+    BTrack tracker(512, 1024); // the library's documented standard settings
     const size_t stop = std::min(wave.rms.size(), startBin + durationBins);
-    double last = static_cast<double>(wave.rms[startBin - 1]) / 32768.0;
-    double slow = last;
+    constexpr double stepsPerBucket = 2205.0 / 512.0;
+    const size_t steps = static_cast<size_t>((stop - startBin) * stepsPerBucket);
+    double previous = static_cast<double>(wave.rms[startBin - 1]) / 32768.0;
+    double smooth = previous;
     std::vector<double> tempos;
-    tempos.reserve(durationBins / 20);
-    for (size_t i = startBin; i < stop && TaskCurrent(task); ++i) {
-        const double energy = static_cast<double>(wave.rms[i]) / 32768.0;
-        slow += 0.10 * (energy - slow);
-        // Positive envelope derivative: a low-cost onset-function proxy.
-        const double onset = std::max(0.0, energy - last) +
-                             0.25 * std::max(0.0, energy - slow);
+    tempos.reserve(60);
+    for (size_t step = 0; step < steps && TaskCurrent(task); ++step) {
+        const double position = static_cast<double>(step) / stepsPerBucket;
+        const size_t offset = static_cast<size_t>(position);
+        const double fraction = position - static_cast<double>(offset);
+        const size_t index = startBin + offset;
+        if (index >= stop) break;
+        const size_t next = std::min(index + 1, stop - 1);
+        const double left = static_cast<double>(wave.rms[index]) / 32768.0;
+        const double right = static_cast<double>(wave.rms[next]) / 32768.0;
+        const double energy = left + (right - left) * fraction;
+        smooth += 0.025 * (energy - smooth);
+        const double onset = std::max(0.0, energy - previous) +
+                             0.25 * std::max(0.0, energy - smooth);
         tracker.processOnsetDetectionFunctionSample(onset);
-        last = energy;
-        if (i >= startBin + 20 * 12 && (i - startBin) % 20 == 0) {
+        previous = energy;
+        // Give BTrack 15 seconds to settle, then sample its estimates.
+        if (step > 15 * 44100 / 512 && step % 86 == 0) {
             const double tempo = tracker.getCurrentTempoEstimate();
             if (std::isfinite(tempo) && tempo >= 80 && tempo <= 160)
                 tempos.push_back(tempo);
