@@ -35,6 +35,28 @@ jobs:
         run: |
           git clone --quiet https://github.com/adamstark/BTrack.git third_party/BTrack
           git -C third_party/BTrack checkout --quiet 9d6127618a5679e9caa74c594b88f1d74f0e035f
+      - name: Adapt BTrack variable-length arrays for MSVC Win32
+        shell: pwsh
+        run: |
+          $path = "third_party/BTrack/src/BTrack.cpp"
+          $source = Get-Content -Raw $path
+          $patches = @(
+            @('float input[onsetDFBufferSize];', 'std::vector<float> input(onsetDFBufferSize);'),
+            @('double threshold[N];', 'std::vector<double> threshold(N);'),
+            @('double logGaussianTransitionWeighting[windowSize];', 'std::vector<double> logGaussianTransitionWeighting(windowSize);'),
+            @('double futureCumulativeScore[onsetDFBufferSize + beatExpectationWindowSize];', 'std::vector<double> futureCumulativeScore(onsetDFBufferSize + beatExpectationWindowSize);'),
+            @('double beatExpectationWindow[beatExpectationWindowSize];', 'std::vector<double> beatExpectationWindow(beatExpectationWindowSize);'),
+            @('double logGaussianTransitionWeighting[pastWindowSize];', 'std::vector<double> logGaussianTransitionWeighting(pastWindowSize);'),
+            @('src_data.data_in = input;', 'src_data.data_in = input.data();'),
+            @('createLogGaussianTransitionWeighting (logGaussianTransitionWeighting,', 'createLogGaussianTransitionWeighting (logGaussianTransitionWeighting.data(),'),
+            @('calculateNewCumulativeScoreValue (cumulativeScore, logGaussianTransitionWeighting,', 'calculateNewCumulativeScoreValue (cumulativeScore, logGaussianTransitionWeighting.data(),'),
+            @('calculateNewCumulativeScoreValue (futureCumulativeScore, logGaussianTransitionWeighting,', 'calculateNewCumulativeScoreValue (futureCumulativeScore.data(), logGaussianTransitionWeighting.data(),')
+          )
+          foreach ($p in $patches) {
+            if (-not $source.Contains($p[0])) { throw "BTrack upstream changed: $($p[0])" }
+            $source = $source.Replace($p[0], $p[1])
+          }
+          Set-Content -Path $path -Value $source -Encoding utf8
       - name: Install static libsamplerate for Win32
         shell: pwsh
         run: |
