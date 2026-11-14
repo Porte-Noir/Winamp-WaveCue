@@ -484,6 +484,8 @@ std::shared_ptr<WaveData> DecodeFlac(const Task& task, std::wstring& error) {
     if (frameCount == 0 || wave->peaks.empty()) {
         error = L"FLAC sans echantillons audio."; return {};
     }
+    rms.Flush(*wave);
+    wave->rms.resize(wave->peaks.size(), 0);
     wave->duration_ms = std::max<uint64_t>(1, frameCount * 1000 / rate);
     wave->harmonicKey = harmonicProbe.Estimate();
     return wave;
@@ -550,6 +552,8 @@ std::shared_ptr<WaveData> DecodeOgg(const Task& task, std::wstring& error) {
     if (!frames || wave->peaks.empty()) {
         error = L"Aucun echantillon audio Vorbis exploitable."; return {};
     }
+    rms.Flush(*wave);
+    wave->rms.resize(wave->peaks.size(), 0);
     wave->duration_ms = std::max<uint64_t>(1, frames * 1000 / static_cast<uint32_t>(rate));
     wave->harmonicKey = harmonicProbe.Estimate();
     return wave;
@@ -731,6 +735,8 @@ std::shared_ptr<WaveData> DecodeAiff(const Task& task, std::wstring& error) {
     if (!frames || wave->peaks.empty()) {
         error = L"Lecture des echantillons AIFF impossible."; return {};
     }
+    rms.Flush(*wave);
+    wave->rms.resize(wave->peaks.size(), 0);
     wave->duration_ms = std::max<uint64_t>(1, frames * 1000 / rate);
     wave->harmonicKey = harmonicProbe.Estimate();
     return wave;
@@ -828,7 +834,9 @@ std::shared_ptr<WaveData> DecodeWithMF(const Task& task, std::wstring& error) {
         }
         if (!TaskCurrent(task)) wave.reset();
         if (wave && frameCount && !wave->peaks.empty()) {
-            wave->duration_ms = std::max<uint64_t>(1, frameCount * 1000 / rate);
+            rms.Flush(*wave);
+    wave->rms.resize(wave->peaks.size(), 0);
+    wave->duration_ms = std::max<uint64_t>(1, frameCount * 1000 / rate);
             wave->harmonicKey = harmonicProbe.Estimate();
         }
         else if (wave) { error = L"Aucune donnee audio exploitable."; wave.reset(); }
@@ -1331,20 +1339,20 @@ HBRUSH GetLcdDotBrush(HDC dc) {
 }
 
 void DrawWave(HDC dc) {
-    // Efficient soft green LCD: a cached 7px dot tile, not per-pixel rendering.
+    // Cached neutral LCD dots over pure black, with original cyan RMS envelope.
     RectFill(dc, g_plot, LCD_BG);
     RectOutline(dc, g_plot, LCD_FRAME);
     RECT inner = g_plot;
     InflateRect(&inner, -10, -9);
     const int cy = (inner.top + inner.bottom) / 2;
-    const COLORREF edge = RGB(73, 145, 55);
+    const COLORREF edge = RGB(94, 97, 109);
     // GDI repeats a tiny bitmap across both waveform windows in one call.
     if (HBRUSH dots = GetLcdDotBrush(dc)) FillRect(dc, &inner, dots);
     // Recessed outer edge with short calibrated ticks, like Winamp's EQ.
     Line(dc, g_plot.left + 2, g_plot.top + 2, g_plot.right - 3, g_plot.top + 2,
-         RGB(21, 56, 25));
+         RGB(63, 66, 76));
     Line(dc, g_plot.left + 2, g_plot.bottom - 3,
-         g_plot.right - 3, g_plot.bottom - 3, RGB(21, 56, 25));
+         g_plot.right - 3, g_plot.bottom - 3, RGB(63, 66, 76));
     // Keep only the calibrated frame ticks; the background grid is dotted.
     for (int x = inner.left + 35; x < inner.right; x += 35) {
         Line(dc, x, g_plot.top + 2, x, g_plot.top + 6, edge);
@@ -1354,8 +1362,8 @@ void DrawWave(HDC dc) {
         Line(dc, g_plot.left + 2, y, g_plot.left + 6, y, edge);
         Line(dc, g_plot.right - 7, y, g_plot.right - 3, y, edge);
     }
-    Line(dc, inner.left, cy, inner.right, cy, RGB(38, 67, 33));
-    if (!g_wave || g_wave->peaks.empty()) {
+    Line(dc, inner.left, cy, inner.right, cy, RGB(35, 38, 45));
+    if (!g_wave || g_wave->rms.empty()) {
         std::wstring msg = g_isLoading
             ? L"ANALYSE EN COURS : " + std::to_wstring(g_progress.load()) + L" %"
             : (g_status.find(L"Echec") != std::wstring::npos ||
@@ -1376,9 +1384,8 @@ void DrawWave(HDC dc) {
     }
     const int innerW = std::max<int>(1, inner.right - inner.left);
     const int half = std::max<int>(1, (inner.bottom - inner.top) / 2 - 7);
-    const size_t n = g_wave->peaks.size();
-    // Original efficient Winamp WaveCue waveform: one peak per screen pixel,
-    // one pen per repaint, no per-cell fill or dense pixel matrix.
+    const size_t n = g_wave->rms.size();
+    // RMS-only envelope; no extra audio work during the repaint.
     HPEN pen = CreatePen(PS_SOLID, 1, LCD_WAVE);
     HGDIOBJ previous = SelectObject(dc, pen);
     for (int x = 0; x < innerW; ++x) {
@@ -1386,10 +1393,10 @@ void DrawWave(HDC dc) {
         size_t b = std::min(n, static_cast<size_t>(
             (static_cast<uint64_t>(x + 1) * n) / innerW));
         b = std::max(b, a + 1);
-        uint16_t maxPeak = 0;
-        for (size_t i = a; i < b; ++i) maxPeak = std::max(maxPeak, g_wave->peaks[i]);
+        uint16_t rmsValue = 0;
+        for (size_t i = a; i < b; ++i) rmsValue = std::max(rmsValue, g_wave->rms[i]);
         int amp = std::max(1, static_cast<int>(
-            (static_cast<uint64_t>(maxPeak) * half) / 32768));
+            (static_cast<uint64_t>(rmsValue) * half) / 32768));
         MoveToEx(dc, inner.left + x, cy - amp, nullptr);
         LineTo(dc, inner.left + x, cy + amp + 1);
     }
@@ -1398,8 +1405,8 @@ void DrawWave(HDC dc) {
 
     if (g_wave->harmonicKey >= 0) {
         RECT keyRect{g_plot.right - 85, g_plot.top + 8, g_plot.right - 10, g_plot.top + 39};
-        RectFill(dc, keyRect, RGB(24, 29, 27));
-        Text(dc, harmonic::Camelot(g_wave->harmonicKey), keyRect, RGB(191, 249, 109),
+        RectFill(dc, keyRect, RGB(22, 23, 29));
+        Text(dc, harmonic::Camelot(g_wave->harmonicKey), keyRect, RGB(239, 216, 105),
              DT_CENTER | DT_VCENTER | DT_SINGLELINE, g_bigFont);
     }
     if (g_cues.start_ms >= 0)
