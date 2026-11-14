@@ -336,7 +336,7 @@ struct CacheHeader {
 #pragma pack(pop)
 static_assert(sizeof(CacheHeader) == 44, "Cache header must be stable");
 constexpr uint32_t CACHE_MAGIC = 0x45554357u;
-constexpr uint32_t RMS_CACHE_VERSION = 4; // constructor-only diagnostic: force regeneration // deliberately rebuild v2: includes experimental BPM
+constexpr uint32_t RMS_CACHE_VERSION = 5; // BPM enabled, re-analyze constructor-only diagnostic caches
 
 std::wstring KeyCachePath(const std::wstring& path) { return CachePath(path) + L".key"; }
 int ReadKeyCache(const Task& task) {
@@ -952,15 +952,9 @@ void WorkerMain() {
         else result->error = L"Windows Media Foundation n'est pas disponible.";
         if (!TaskCurrent(task)) continue;
         if (result->wave) {
-            // Diagnostic only: BTrack remains linked but its analysis is bypassed.
-            // If Winamp stays stable, the crash is in the BPM execution path.
-            // Constructor-only diagnostic: initialize FFTW/BTrack internals
-            // but never feed frames or compute tempo.
-            if (result->wave->rms.size() > 60 * 20 + 15 * 20 && TaskCurrent(task)) {
-                BTrack probe(512, 1024);
-                (void)probe.getCurrentTempoEstimate();
-            }
-            result->wave->bpm = -1;
+            // BTrack class ABI is consistent across the plugin and static library.
+            // Run the experimental BPM estimator after decoding on the worker thread.
+            result->wave->bpm = EstimateBpmFromRms(*result->wave, task);
             if (TaskCurrent(task)) SaveCache(task, *result->wave);
         }
         if (!TaskCurrent(task)) continue;
