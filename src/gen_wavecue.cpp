@@ -122,6 +122,7 @@ struct WaveData {
     uint64_t duration_ms = 0;
     std::vector<uint16_t> peaks;
     std::vector<uint16_t> rms; // 50ms loudness envelope
+    double rmsDisplayGain = 1.0; // visual scaling only; never affects audio
     int harmonicKey = -2; // -2 unknown; -1 uncertain; 0..23 pitch class + mode
 };
 std::shared_ptr<WaveData> g_wave;
@@ -367,6 +368,17 @@ bool TaskCurrent(const Task& task) {
     return task.generation == (task.playing ? g_playGeneration.load() : g_generation.load());
 }
 
+// Compute just once when the waveform is loaded/decoded, not every paint.
+// Preserve the RMS dynamics while making quiet masters easier to inspect.
+// Cap gain so almost-silent files and residual noise stay quiet.
+void SetRmsDisplayGain(WaveData& wave) {
+    if (wave.rms.empty()) { wave.rmsDisplayGain = 1.0; return; }
+    const auto loudest = *std::max_element(wave.rms.begin(), wave.rms.end());
+    wave.rmsDisplayGain = loudest
+        ? std::max(1.0, std::min(3.0, (32767.0 * 0.86) / loudest))
+        : 1.0;
+}
+
 std::shared_ptr<WaveData> LoadCache(const Task& task) {
     FILE* f = nullptr;
     if (_wfopen_s(&f, CachePath(task.path).c_str(), L"rb") != 0 || !f) return {};
@@ -391,6 +403,7 @@ std::shared_ptr<WaveData> LoadCache(const Task& task) {
         return {};
     }
     fclose(f);
+    SetRmsDisplayGain(*wave);
     wave->harmonicKey = ReadKeyCache(task);
     return wave;
 }
@@ -486,6 +499,7 @@ std::shared_ptr<WaveData> DecodeFlac(const Task& task, std::wstring& error) {
     }
     rms.Flush(*wave);
     wave->rms.resize(wave->peaks.size(), 0);
+    SetRmsDisplayGain(*wave);
     wave->duration_ms = std::max<uint64_t>(1, frameCount * 1000 / rate);
     wave->harmonicKey = harmonicProbe.Estimate();
     return wave;
@@ -554,6 +568,7 @@ std::shared_ptr<WaveData> DecodeOgg(const Task& task, std::wstring& error) {
     }
     rms.Flush(*wave);
     wave->rms.resize(wave->peaks.size(), 0);
+    SetRmsDisplayGain(*wave);
     wave->duration_ms = std::max<uint64_t>(1, frames * 1000 / static_cast<uint32_t>(rate));
     wave->harmonicKey = harmonicProbe.Estimate();
     return wave;
@@ -737,6 +752,7 @@ std::shared_ptr<WaveData> DecodeAiff(const Task& task, std::wstring& error) {
     }
     rms.Flush(*wave);
     wave->rms.resize(wave->peaks.size(), 0);
+    SetRmsDisplayGain(*wave);
     wave->duration_ms = std::max<uint64_t>(1, frames * 1000 / rate);
     wave->harmonicKey = harmonicProbe.Estimate();
     return wave;
@@ -836,6 +852,7 @@ std::shared_ptr<WaveData> DecodeWithMF(const Task& task, std::wstring& error) {
         if (wave && frameCount && !wave->peaks.empty()) {
             rms.Flush(*wave);
     wave->rms.resize(wave->peaks.size(), 0);
+    SetRmsDisplayGain(*wave);
     wave->duration_ms = std::max<uint64_t>(1, frameCount * 1000 / rate);
             wave->harmonicKey = harmonicProbe.Estimate();
         }
@@ -1395,8 +1412,8 @@ void DrawWave(HDC dc) {
         b = std::max(b, a + 1);
         uint16_t rmsValue = 0;
         for (size_t i = a; i < b; ++i) rmsValue = std::max(rmsValue, g_wave->rms[i]);
-        int amp = std::max(1, static_cast<int>(
-            (static_cast<uint64_t>(rmsValue) * half) / 32768));
+        const int amp = std::max(1, std::min(half, static_cast<int>(
+            (static_cast<double>(rmsValue) * half * g_wave->rmsDisplayGain) / 32768.0)));
         MoveToEx(dc, inner.left + x, cy - amp, nullptr);
         LineTo(dc, inner.left + x, cy + amp + 1);
     }
