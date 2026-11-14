@@ -30,13 +30,23 @@ jobs:
         run: |
           & "$env:VCPKG_INSTALLATION_ROOT/vcpkg.exe" install fftw3:x86-windows-static
           if ($LASTEXITCODE -ne 0) { throw "Static FFTW3 installation failed" }
+      - name: Fetch pinned BTrack (GPLv3)
+        shell: pwsh
+        run: |
+          git clone --quiet https://github.com/adamstark/BTrack.git third_party/BTrack
+          git -C third_party/BTrack checkout --quiet 9d6127618a5679e9caa74c594b88f1d74f0e035f
+      - name: Install static libsamplerate for Win32
+        shell: pwsh
+        run: |
+          & "$env:VCPKG_INSTALLATION_ROOT/vcpkg.exe" install libsamplerate:x86-windows-static
+          if ($LASTEXITCODE -ne 0) { throw "Static libsamplerate installation failed" }
       - name: Configure Win32
         shell: pwsh
-        run: cmake -S . -B build -G "Visual Studio 17 2022" -A Win32 -DFFTW3_INCLUDE_DIR="$env:VCPKG_INSTALLATION_ROOT/installed/x86-windows-static/include" -DFFTW3_LIBRARY="$env:VCPKG_INSTALLATION_ROOT/installed/x86-windows-static/lib/fftw3.lib"
+        run: cmake -S . -B build -G "Visual Studio 17 2022" -A Win32 -DFFTW3_INCLUDE_DIR="$env:VCPKG_INSTALLATION_ROOT/installed/x86-windows-static/include" -DFFTW3_LIBRARY="$env:VCPKG_INSTALLATION_ROOT/installed/x86-windows-static/lib/fftw3.lib" -DLIBSAMPLERATE_INCLUDE_DIR="$env:VCPKG_INSTALLATION_ROOT/installed/x86-windows-static/include" -DLIBSAMPLERATE_LIBRARY="$env:VCPKG_INSTALLATION_ROOT/installed/x86-windows-static/lib/samplerate.lib"
       - name: Build Release
         run: cmake --build build --config Release
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ github.ref_name == 'main' && 'gen_wavecue-win32' || github.ref_name == 'experimental/rms-boost-auto-cache' && 'gen_wavecue-rms-boost-auto-cache' || github.ref_name == 'experimental/rms-auto-height' && 'gen_wavecue-rms-auto-height' || github.ref_name == 'experimental/cyan-rms-black' && 'gen_wavecue-cyan-rms-black' || github.ref_name == 'experimental/winamp-forest-green' && 'gen_wavecue-winamp-forest-green' || github.ref_name == 'experimental/winamp-soft-lcd' && 'gen_wavecue-winamp-soft-lcd' || github.ref_name == 'experimental/winamp-lime-grid' && 'gen_wavecue-winamp-lime-grid' || github.ref_name == 'experimental/winamp-lcd-waveforms' && 'gen_wavecue-winamp-lcd-waveforms' || github.ref_name == 'experimental/winamp-classic-ui' && 'gen_wavecue-winamp-classic-ui' || 'gen_wavecue-camelot-experimental' }}
+          name: ${{ github.ref_name == 'main' && 'gen_wavecue-win32' || github.ref_name == 'experimental/btrack-bpm' && 'gen_wavecue-btrack-bpm' || github.ref_name == 'experimental/rms-boost-auto-cache' && 'gen_wavecue-rms-boost-auto-cache' || github.ref_name == 'experimental/rms-auto-height' && 'gen_wavecue-rms-auto-height' || github.ref_name == 'experimental/cyan-rms-black' && 'gen_wavecue-cyan-rms-black' || github.ref_name == 'experimental/winamp-forest-green' && 'gen_wavecue-winamp-forest-green' || github.ref_name == 'experimental/winamp-soft-lcd' && 'gen_wavecue-winamp-soft-lcd' || github.ref_name == 'experimental/winamp-lime-grid' && 'gen_wavecue-winamp-lime-grid' || github.ref_name == 'experimental/winamp-lcd-waveforms' && 'gen_wavecue-winamp-lcd-waveforms' || github.ref_name == 'experimental/winamp-classic-ui' && 'gen_wavecue-winamp-classic-ui' || 'gen_wavecue-camelot-experimental' }}
           path: build/Release/gen_wavecue.dll
           if-no-files-found: error
