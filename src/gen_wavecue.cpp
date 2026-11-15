@@ -1243,6 +1243,10 @@ void RequestPlayingLoad() {
         InvalidateRect(g_hwnd, &g_playingPlot, FALSE);
         if (g_playingWave->harmonicKey >= -1) return;
     }
+    // Selected Track may already be decoding this exact file.
+    // Its completed waveform will be shared with Actually Playing.
+    if (g_isLoading && _wcsicmp(path.c_str(), g_selectedPath.c_str()) == 0)
+        return;
     g_playingLoading = true;
     g_batchPreempt.store(true);
     {
