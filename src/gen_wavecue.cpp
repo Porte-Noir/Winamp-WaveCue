@@ -1130,7 +1130,6 @@ void RequestLoad() {
         InvalidateRect(g_hwnd, nullptr, FALSE);
         return;
     }
-    g_batchPreempt.store(true);
     Task task{g_selectedPath, stamp, ++g_generation};
     if (auto cached = LoadCache(task)) {
         const bool keyReady = cached->harmonicKey >= -1;
@@ -1148,6 +1147,7 @@ void RequestLoad() {
     } else g_wave.reset();
     g_progress = 0;
     g_isLoading = true;
+    g_batchPreempt.store(true);
     if (!g_wave) g_status = L"Analyse audio et detection harmonique en cours...";
     {
         std::lock_guard<std::mutex> lk(g_taskMutex);
@@ -1237,7 +1237,6 @@ void RequestPlayingLoad() {
     }
     FileStamp stamp{};
     if (!ReadFileStamp(path, stamp)) return;
-    g_batchPreempt.store(true);
     Task task{path, stamp, g_playGeneration.load(), true};
     if (auto cached = LoadCache(task)) {
         g_playingWave = std::move(cached);
@@ -1245,6 +1244,7 @@ void RequestPlayingLoad() {
         if (g_playingWave->harmonicKey >= -1) return;
     }
     g_playingLoading = true;
+    g_batchPreempt.store(true);
     {
         std::lock_guard<std::mutex> lk(g_taskMutex);
         g_pendingPlayingTask = std::make_unique<Task>(std::move(task));
