@@ -50,6 +50,8 @@
 #define IPC_GETOUTPUTTIME 105
 #define IPC_JUMPTOTIME 106
 #define IPC_GETLISTPOS 125
+#define IPC_SETPLAYLISTPOS 121
+#define WINAMP_BUTTON2 40045
 #define IPC_GETPLAYLISTFILE 211
 #define IPC_GETPLAYLISTFILEW 214
 #define IPC_PLAYLIST_GET_NEXT_SELECTED 3029
@@ -118,6 +120,9 @@ std::deque<PlaybackSample> g_recentPlayback;
 int64_t g_delayedPlayhead = -1;
 bool g_delayedOnPreviousTrack = false;
 bool g_startPending = false; // Wait until Winamp actually starts the new file.
+std::wstring g_switchPendingPath;
+int64_t g_switchPendingMs = -1;
+ULONGLONG g_switchPendingUntil = 0;
 bool g_wasStopped = true;
 bool g_isLoading = false;
 std::wstring g_status = L"Selectionnez un morceau dans la playlist de Winamp.";
@@ -175,7 +180,7 @@ constexpr COLORREF START = RGB(127, 220, 105);
 constexpr COLORREF END = RGB(234, 112, 126);
 
 RECT g_plot = {34, 130, 1040, 435};
-enum Mode { ModeNone, ModeSeek, ModeStart, ModeEnd, ModeDelete };
+enum Mode { ModeNone, ModeSeek, ModeStart, ModeEnd, ModeDelete, ModeSwitch };
 Mode g_mode = ModeNone;
 enum Marker { MarkerNone, MarkerCue, MarkerStart, MarkerEnd };
 Marker g_marker = MarkerNone;
@@ -190,7 +195,7 @@ int g_hover = 0;
 constexpr int BUTTON_LOAD = 1, BUTTON_SEEK = 2, BUTTON_START = 3,
               BUTTON_END = 4, BUTTON_DELETE = 5, BUTTON_AUTO = 6,
               BUTTON_PLAYING_AUTO = 7, BUTTON_PLAYING_LOAD = 8, BUTTON_MASTER_AUTO = 9,
-              BUTTON_STREAM_DELAY = 10;
+              BUTTON_STREAM_DELAY = 10, BUTTON_SWITCH = 11;
 
 std::wstring FileLabel(const std::wstring& path) {
     size_t pos = path.find_last_of(L"\\/");
@@ -1243,6 +1248,24 @@ void PollWinamp() {
         g_startPending = true;
         g_skipSent = false;
     }
+    // One-time SWITCH position takes precedence over automatic IN.
+    if (g_switchPendingMs >= 0) {
+        if (GetTickCount64() > g_switchPendingUntil) {
+            g_switchPendingMs = -1;
+            g_switchPendingPath.clear();
+        } else if (state == 1 && observedMs >= 0 &&
+                   _wcsicmp(playPath.c_str(), g_switchPendingPath.c_str()) == 0) {
+            const int64_t targetMs = g_switchPendingMs;
+            g_switchPendingMs = -1;
+            g_switchPendingPath.clear();
+            g_startPending = false;
+            SendMessageW(g_winamp, WM_WA_IPC,
+                         static_cast<WPARAM>(targetMs), IPC_JUMPTOTIME);
+            // Prevent an immediate OUT skip when entering beyond an OUT cue.
+            g_skipSent = g_playbackCues.end_ms >= 0 &&
+                         targetMs >= g_playbackCues.end_ms;
+        }
+    }
     if (g_startPending && state == 1 && observedMs >= 0) {
         g_startPending = false;
         // Never jump backwards if the plug-in was opened mid-track, or if the
@@ -1354,13 +1377,15 @@ void Layout(int width, int height) {
     g_buttons.push_back({BUTTON_MASTER_AUTO,
         {masterLeft, 9, masterLeft + 153, 36},
         g_masterAuto ? L"WAVECUE AUTO ON" : L"WAVECUE AUTO OFF", true});
-    const int autoLeft = right - 121, loadLeft = autoLeft - 160;
+    const int autoLeft = right - 121, seekLeft = autoLeft - 79, loadLeft = seekLeft - 160;
     g_buttons.push_back({BUTTON_PLAYING_LOAD, {loadLeft, 45, loadLeft + 153, 73},
         L"LOAD WAVEFORM", !g_playingPath.empty() && g_playingIndex >= 0});
+    g_buttons.push_back({BUTTON_SEEK, {seekLeft, 45, seekLeft + 72, 73},
+        L"SEEK", !g_playingPath.empty() && !!g_playingWave && g_playheadMs >= 0});
     g_buttons.push_back({BUTTON_PLAYING_AUTO, {autoLeft, 45, autoLeft + 121, 73},
         L"AUTO IN/OUT", !g_playingPath.empty() && g_playingIndex >= 0});
     const struct { int id, w; const wchar_t* label; } specs[] = {
-        {BUTTON_LOAD, 163, L"LOAD WAVEFORM"}, {BUTTON_SEEK, 72, L"SEEK"},
+        {BUTTON_LOAD, 163, L"LOAD WAVEFORM"}, {BUTTON_SWITCH, 72, L"SWITCH"},
         {BUTTON_START, 82, L"SET IN"}, {BUTTON_END, 82, L"SET OUT"},
         {BUTTON_DELETE, 80, L"DELETE"}, {BUTTON_AUTO, 125, L"AUTO IN/OUT"},
     };
@@ -1378,6 +1403,7 @@ bool ButtonActive(const Button& b) {
     return (b.id == BUTTON_MASTER_AUTO && g_masterAuto) ||
         (b.id == BUTTON_STREAM_DELAY && g_streamDelayEnabled) ||
         (b.id == BUTTON_SEEK && g_mode == ModeSeek) ||
+        (b.id == BUTTON_SWITCH && g_mode == ModeSwitch) ||
         (b.id == BUTTON_START && g_mode == ModeStart) ||
         (b.id == BUTTON_END && g_mode == ModeEnd) ||
         (b.id == BUTTON_DELETE && g_mode == ModeDelete) ||
@@ -1628,7 +1654,7 @@ void Paint(HWND hwnd) {
     Text(dc, L"WAVECUE", title, LCD, DT_SINGLELINE | DT_LEFT | DT_VCENTER, g_bigFont);
     RECT playingLabel{22, 45, 174, 74};
     Text(dc, L"ACTUALLY PLAYING", playingLabel, SECTION_YELLOW, DT_SINGLELINE | DT_VCENTER);
-    RECT playingFile{176, 45, std::max(177, w - 317), 74};
+    RECT playingFile{176, 45, std::max(177, w - 395), 74};
     Text(dc, g_playingPath.empty() ? L"Aucune lecture" : FileLabel(g_playingPath),
          playingFile, LCD, DT_SINGLELINE | DT_END_ELLIPSIS | DT_VCENTER);
     DrawPlayingWave(dc);
@@ -1644,7 +1670,8 @@ void Paint(HWND hwnd) {
     RECT status{22, h - 53, w - 22, h - 31};
     Text(dc, g_status, status, MUTED, DT_SINGLELINE | DT_END_ELLIPSIS | DT_VCENTER);
     RECT tip{22, h - 29, w - 22, h - 7};
-    std::wstring hint = g_mode == ModeSeek ? L"SEEK ARME : un seul clic sur la waveform deplace la lecture, puis se desactive."
+    std::wstring hint = g_mode == ModeSeek ? L"SEEK : cliquez sur ACTUALLY PLAYING pour deplacer la lecture."
+        : g_mode == ModeSwitch ? L"SWITCH : cliquez sur SELECTED TRACK pour lancer ce morceau a cet instant."
         : g_mode == ModeStart ? L"Cliquez sur la waveform pour placer IN."
         : g_mode == ModeEnd ? L"Cliquez sur la waveform pour placer OUT."
         : g_mode == ModeDelete ? L"DELETE : cliquez sur un repere pour supprimer SANS deplacer la lecture."
@@ -1742,8 +1769,14 @@ void ActivateButton(int id) {
     case BUTTON_SEEK:
         g_mode = g_mode == ModeSeek ? ModeNone : ModeSeek;
         g_status = g_mode == ModeSeek
-            ? L"SEEK ARME : cliquez sur la waveform pour sauter (un seul saut). Echap pour annuler."
-            : L"Seek desactive : clics sans effet sur la lecture.";
+            ? L"SEEK : cliquez dans ACTUALLY PLAYING pour deplacer la lecture."
+            : L"SEEK desactive.";
+        break;
+    case BUTTON_SWITCH:
+        g_mode = g_mode == ModeSwitch ? ModeNone : ModeSwitch;
+        g_status = g_mode == ModeSwitch
+            ? L"SWITCH : cliquez dans SELECTED TRACK pour jouer ce morceau a cet endroit."
+            : L"SWITCH annule.";
         break;
     case BUTTON_START: g_mode = g_mode == ModeStart ? ModeNone : ModeStart; break;
     case BUTTON_END: g_mode = g_mode == ModeEnd ? ModeNone : ModeEnd; break;
@@ -1824,15 +1857,24 @@ void ClickPlot(POINT pt) {
         InvalidateRect(g_hwnd, nullptr, FALSE);
         return;
     }
-    if (g_mode == ModeSeek) {
-        g_mode = ModeNone; // Disarm before sending IPC to Winamp.
-        if (g_selectedIndex == g_playingIndex &&
-            _wcsicmp(g_selectedPath.c_str(), g_playingPath.c_str()) == 0 &&
-            g_playheadMs >= 0) {
-            SeekPlaying(ms);
-            g_status = L"Seek effectue vers " + TimeLabel(ms) + L". Mode Seek desactive.";
+    if (g_mode == ModeSwitch) {
+        // Explicit two-step action; never alter stored IN/OUT markers.
+        g_mode = ModeNone;
+        if (!g_winamp || !IsWindow(g_winamp) || g_selectedIndex < 0 ||
+            g_selectedPath.empty()) {
+            g_status = L"SWITCH indisponible : selection invalide.";
         } else {
-            g_status = L"Seek desactive. Lancez la lecture du titre selectionne pour vous deplacer.";
+            // Keep the seek pending until Winamp reports the new file as
+            // playing: applying it before the Play command would target
+            // the previous track.
+            g_switchPendingPath = g_selectedPath;
+            g_switchPendingMs = ms;
+            g_switchPendingUntil = GetTickCount64() + 5000;
+            SendMessageW(g_winamp, WM_WA_IPC,
+                         static_cast<WPARAM>(g_selectedIndex), IPC_SETPLAYLISTPOS);
+            SendMessageW(g_winamp, WM_COMMAND, WINAMP_BUTTON2, 0);
+            g_status = L"SWITCH : lancement au point " + TimeLabel(ms) + L".";
+            PollWinamp();
         }
         InvalidateRect(g_hwnd, nullptr, FALSE);
         return;
@@ -1999,10 +2041,29 @@ LRESULT CALLBACK WaveWndProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
         return 0;
     case WM_LBUTTONDOWN: {
         POINT pt{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+        if (pt.x >= 22 && pt.x < 142 && pt.y >= 5 && pt.y < 39) {
+            ShowPropertiesWindow();
+            return 0;
+        }
         SetFocus(hwnd);
         int button = ButtonUnder(pt);
         if (button) ActivateButton(button);
         else if (ClickBpmBadge(pt)) return 0;
+        else if (g_mode == ModeSeek && PtInRect(&g_playingPlot, pt) &&
+                 g_playingWave && g_playingWave->duration_ms > 0) {
+            const int width = std::max(1L, g_playingPlot.right - g_playingPlot.left - 20L);
+            const int relX = std::clamp<int>(pt.x - g_playingPlot.left - 10, 0, width);
+            const int64_t ms = static_cast<int64_t>(relX) *
+                static_cast<int64_t>(g_playingWave->duration_ms) / width;
+            g_mode = ModeNone;
+            if (g_playingIndex >= 0 && g_playheadMs >= 0) {
+                SendMessageW(g_winamp, WM_WA_IPC,
+                             static_cast<WPARAM>(ms), IPC_JUMPTOTIME);
+                g_status = L"SEEK : lecture deplacee a " + TimeLabel(ms) + L".";
+            } else g_status = L"SEEK indisponible pendant l'arret.";
+            InvalidateRect(hwnd, nullptr, FALSE);
+            return 0;
+        }
         else if (InDelaySlider(pt)) {
             g_delayDragging = true;
             SetCapture(hwnd);
