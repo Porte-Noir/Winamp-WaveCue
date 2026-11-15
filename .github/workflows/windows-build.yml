@@ -7,13 +7,13 @@ jobs:
   build:
     runs-on: windows-2022
     env:
-      VCPKG_DEFAULT_BINARY_CACHE: ${{ runner.temp }}\vcpkg-cache
+      VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}\vcpkg-cache
     steps:
       - uses: actions/checkout@v4
       - name: Restore compiled vcpkg libraries
         uses: actions/cache@v4
         with:
-          path: ${{ runner.temp }}\vcpkg-cache
+          path: ${{ github.workspace }}\vcpkg-cache
           key: vcpkg-wavecue-x86-static-fftw3-samplerate-v1
       - name: Prepare vcpkg cache
         shell: pwsh
