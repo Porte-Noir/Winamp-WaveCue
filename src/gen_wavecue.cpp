@@ -1027,6 +1027,15 @@ void RefreshButtonLayout() {
         Layout(client.right - client.left, client.bottom - client.top);
 }
 
+// Share one decoded waveform whenever the selected file is also playing.
+// This is a UI-thread pointer handoff, not a second analysis or a seek.
+void SyncSelectedWaveToPlaying() {
+    if (!g_wave || g_selectedPath.empty() || g_playingPath.empty() ||
+        _wcsicmp(g_selectedPath.c_str(), g_playingPath.c_str()) != 0) return;
+    g_playingWave = g_wave;
+    if (g_hwnd) InvalidateRect(g_hwnd, &g_playingPlot, FALSE);
+}
+
 void ChangeSelected(int index, const std::wstring& path) {
     if (g_selectedIndex == index && g_selectedPath == path) return;
     CancelAnalysis();
@@ -1048,12 +1057,14 @@ void ChangeSelected(int index, const std::wstring& path) {
             Task cacheTask{path, stamp, g_generation.load(), false};
             g_wave = LoadCache(cacheTask);
         }
-        if (g_wave)
+        if (g_wave) {
+            SyncSelectedWaveToPlaying();
             g_status = g_wave->harmonicKey >= -1
                 ? L"Waveform et tonalite lues depuis le cache."
                 : L"Waveform en cache. Cliquez sur Load pour calculer la tonalite.";
-        else
+        } else {
             g_status = L"Waveform vide. Cliquez sur Show/Load Waveform.";
+        }
     }
     RefreshButtonLayout();
     InvalidateRect(g_hwnd, nullptr, FALSE);
@@ -1071,6 +1082,7 @@ void RequestLoad() {
     if (auto cached = LoadCache(task)) {
         const bool keyReady = cached->harmonicKey >= -1;
         g_wave = std::move(cached);
+        SyncSelectedWaveToPlaying();
         if (keyReady) {
             g_isLoading = false;
             g_status = L"Waveform et tonalite lues depuis le cache.";
@@ -1112,11 +1124,7 @@ void AcceptWorkerResult() {
     if (!done || !TaskCurrent(done->task) || done->task.path != g_selectedPath) return;
     g_isLoading = false;
     g_wave = std::move(done->wave);
-    if (g_wave && g_playingWave &&
-        _wcsicmp(g_selectedPath.c_str(), g_playingPath.c_str()) == 0) {
-        g_playingWave = g_wave;
-        InvalidateRect(g_hwnd, &g_playingPlot, FALSE);
-    }
+    SyncSelectedWaveToPlaying();
     RefreshButtonLayout();
     g_status = g_wave ? L"Waveform prete. Tonalite experimentale : " + std::wstring(harmonic::Camelot(g_wave->harmonicKey))
                       : (done->error.empty() ? L"Impossible d'analyser ce fichier." : done->error);
