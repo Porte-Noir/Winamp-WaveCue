@@ -50,6 +50,7 @@
 #define IPC_GETOUTPUTTIME 105
 #define IPC_JUMPTOTIME 106
 #define IPC_GETLISTPOS 125
+#define IPC_GETLISTLENGTH 124
 #define IPC_SETPLAYLISTPOS 121
 #define WINAMP_BUTTON2 40045
 #define IPC_GETPLAYLISTFILE 211
@@ -89,6 +90,13 @@ HWND g_hwnd = nullptr;
 HWND g_propertiesHwnd = nullptr;
 constexpr UINT ID_PROPERTIES_MENU = 0x1F10;
 constexpr int ID_PROPERTIES_CLOSE = 1101;
+constexpr int ID_PREF_GENERAL = 1201, ID_PREF_ANALYSIS = 1202, ID_PREF_ABOUT = 1203;
+constexpr int ID_PREF_BATCH = 1211, ID_PREF_BATCH_CANCEL = 1212, ID_PREF_AUTO = 1213;
+int g_propertiesPage = 0;
+bool g_autoAnalyzeSelection = false;
+std::vector<HWND> g_propertyPageControls;
+HBRUSH g_propertiesBrush = nullptr;
+constexpr int BATCH_LIMIT = 30;
 std::atomic<HWND> g_noticeHwnd{nullptr};
 HWND g_winamp = nullptr;
 bool g_winampSubclassInstalled = false;
@@ -143,7 +151,7 @@ RECT g_playingPlot = {28, 83, 1000, 218};
 
 // Decoding runs exclusively in a background MTA thread.
 struct FileStamp { uint64_t size = 0; uint64_t modified = 0; };
-struct Task { std::wstring path; FileStamp stamp; uint64_t generation = 0; bool playing = false; };
+struct Task { std::wstring path; FileStamp stamp; uint64_t generation = 0; bool playing = false; bool batch = false; };
 struct Result {
     Task task;
     std::shared_ptr<WaveData> wave;
@@ -153,6 +161,11 @@ std::mutex g_taskMutex;
 std::condition_variable g_taskWake;
 std::unique_ptr<Task> g_pendingTask;
 std::unique_ptr<Task> g_pendingPlayingTask;
+std::deque<Task> g_batchTasks;
+std::atomic<uint64_t> g_batchGeneration{0};
+std::atomic<bool> g_batchPreempt{false};
+std::atomic<int> g_batchCompleted{0};
+std::atomic<int> g_batchTotal{0};
 std::unique_ptr<Result> g_completedPlaying;
 std::atomic<uint64_t> g_playGeneration{0};
 std::unique_ptr<Result> g_completed;
@@ -399,6 +412,8 @@ void WriteKeyCache(const Task& task, int key) {
 }
 
 bool TaskCurrent(const Task& task) {
+    if (task.batch)
+        return task.generation == g_batchGeneration.load() && !g_batchPreempt.load();
     return task.generation == (task.playing ? g_playGeneration.load() : g_generation.load());
 }
 
@@ -963,10 +978,19 @@ void WorkerMain() {
         Task task;
         {
             std::unique_lock<std::mutex> lk(g_taskMutex);
-            g_taskWake.wait(lk, [] { return g_workerStop || g_pendingTask != nullptr || g_pendingPlayingTask != nullptr; });
+            g_taskWake.wait(lk, [] { return g_workerStop || g_pendingTask != nullptr ||
+                g_pendingPlayingTask != nullptr || !g_batchTasks.empty(); });
             if (g_workerStop) break;
-            if (g_pendingTask) { task = *g_pendingTask; g_pendingTask.reset(); }
-            else { task = *g_pendingPlayingTask; g_pendingPlayingTask.reset(); }
+            if (g_pendingTask) {
+                task = *g_pendingTask; g_pendingTask.reset();
+                g_batchPreempt.store(false);
+            } else if (g_pendingPlayingTask) {
+                task = *g_pendingPlayingTask; g_pendingPlayingTask.reset();
+                g_batchPreempt.store(false);
+            } else {
+                task = g_batchTasks.front(); g_batchTasks.pop_front();
+                g_batchPreempt.store(false);
+            }
         }
         auto result = std::make_unique<Result>();
         result->task = task;
@@ -982,7 +1006,14 @@ void WorkerMain() {
             result->wave = DecodeAiff(task, result->error);
         else if (mfReady) result->wave = DecodeWithMF(task, result->error);
         else result->error = L"Windows Media Foundation n'est pas disponible.";
-        if (!TaskCurrent(task)) continue;
+        if (!TaskCurrent(task)) {
+            if (task.batch && task.generation == g_batchGeneration.load() &&
+                g_batchPreempt.load()) {
+                std::lock_guard<std::mutex> lk(g_taskMutex);
+                g_batchTasks.push_front(task);
+            }
+            continue;
+        }
         if (result->wave) {
             // BTrack class ABI is consistent across the plugin and static library.
             // Run the experimental BPM estimator after decoding on the worker thread.
@@ -990,8 +1021,17 @@ void WorkerMain() {
             result->wave->bpmDouble = ReadBpmChoice(task.path);
             if (TaskCurrent(task)) SaveCache(task, *result->wave);
         }
-        if (!TaskCurrent(task)) continue;
-        {
+        if (!TaskCurrent(task)) {
+            if (task.batch && task.generation == g_batchGeneration.load() &&
+                g_batchPreempt.load()) {
+                std::lock_guard<std::mutex> lk(g_taskMutex);
+                g_batchTasks.push_front(task);
+            }
+            continue;
+        }
+        if (task.batch) {
+            ++g_batchCompleted;
+        } else {
             std::lock_guard<std::mutex> lk(g_taskMutex);
             if (task.playing) g_completedPlaying = std::move(result);
             else g_completed = std::move(result);
@@ -1027,6 +1067,8 @@ void CancelAnalysis() {
 }
 
 void Layout(int width, int height);
+void RequestLoad();
+void UpdatePropertiesProgress();
 
 void RefreshButtonLayout() {
     if (!g_hwnd || !IsWindow(g_hwnd)) return;
@@ -1076,6 +1118,8 @@ void ChangeSelected(int index, const std::wstring& path) {
     }
     RefreshButtonLayout();
     InvalidateRect(g_hwnd, nullptr, FALSE);
+    if (g_autoAnalyzeSelection && !g_wave && !g_selectedPath.empty())
+        RequestLoad();
 }
 
 void RequestLoad() {
@@ -1086,6 +1130,7 @@ void RequestLoad() {
         InvalidateRect(g_hwnd, nullptr, FALSE);
         return;
     }
+    g_batchPreempt.store(true);
     Task task{g_selectedPath, stamp, ++g_generation};
     if (auto cached = LoadCache(task)) {
         const bool keyReady = cached->harmonicKey >= -1;
@@ -1113,6 +1158,7 @@ void RequestLoad() {
 }
 
 void AcceptWorkerResult() {
+    UpdatePropertiesProgress();
     std::unique_ptr<Result> playingDone;
     {
         std::lock_guard<std::mutex> lk(g_taskMutex);
@@ -1191,6 +1237,7 @@ void RequestPlayingLoad() {
     }
     FileStamp stamp{};
     if (!ReadFileStamp(path, stamp)) return;
+    g_batchPreempt.store(true);
     Task task{path, stamp, g_playGeneration.load(), true};
     if (auto cached = LoadCache(task)) {
         g_playingWave = std::move(cached);
@@ -2248,6 +2295,8 @@ static void PluginQuit() {
         g_workerStop = true;
         g_pendingTask.reset();
         g_pendingPlayingTask.reset();
+        g_batchTasks.clear();
+        ++g_batchGeneration;
     }
     g_taskWake.notify_one();
     if (g_worker.joinable()) g_worker.join();
