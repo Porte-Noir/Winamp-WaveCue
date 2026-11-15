@@ -1849,6 +1849,8 @@ bool ClickBpmBadge(POINT pt) {
 
 void ClickPlot(POINT pt) {
     if (!g_wave || !IsInPlot(pt)) return;
+    // SEEK is armed for the playing panel only.
+    if (g_mode == ModeSeek) return;
     const int64_t ms = MsAt(pt.x);
     bool ok = true;
     if (g_mode == ModeDelete) {
