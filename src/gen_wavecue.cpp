@@ -92,8 +92,10 @@ constexpr UINT ID_PROPERTIES_MENU = 0x1F10;
 constexpr int ID_PROPERTIES_CLOSE = 1101;
 constexpr int ID_PREF_GENERAL = 1201, ID_PREF_ANALYSIS = 1202, ID_PREF_ABOUT = 1203;
 constexpr int ID_PREF_BATCH = 1211, ID_PREF_BATCH_CANCEL = 1212, ID_PREF_AUTO = 1213;
+constexpr int ID_PREF_SHOW_BPM = 1214, ID_PREF_SHOW_KEY = 1215, ID_PREF_RMS_GAIN = 1216;
 int g_propertiesPage = 0;
 bool g_autoAnalyzeSelection = false;
+bool g_showBpm = true, g_showKey = true, g_normalizeRms = true;
 std::vector<HWND> g_propertyPageControls;
 HBRUSH g_propertiesBrush = nullptr;
 constexpr int BATCH_LIMIT = 30;
@@ -1606,14 +1608,14 @@ void DrawWave(HDC dc) {
         uint16_t rmsValue = 0;
         for (size_t i = a; i < b; ++i) rmsValue = std::max(rmsValue, g_wave->rms[i]);
         const int amp = std::max(1, std::min(half, static_cast<int>(
-            (static_cast<double>(rmsValue) * half * g_wave->rmsDisplayGain) / 32768.0)));
+            (static_cast<double>(rmsValue) * half * (g_normalizeRms ? g_wave->rmsDisplayGain : 1.0)) / 32768.0)));
         MoveToEx(dc, inner.left + x, cy - amp, nullptr);
         LineTo(dc, inner.left + x, cy + amp + 1);
     }
     SelectObject(dc, previous);
     DeleteObject(pen);
 
-    if (g_wave->bpm >= 80) {
+    if (g_showBpm && g_wave->bpm >= 80) {
         RECT bpmRect{g_plot.left + 10, g_plot.top + 8,
                      g_plot.left + 74, g_plot.top + 39};
         RectFill(dc, bpmRect, RGB(22, 23, 29));
@@ -1632,7 +1634,7 @@ void DrawWave(HDC dc) {
         Text(dc, tempoLabel, bpmRect,
              RGB(239, 216, 105), DT_CENTER | DT_VCENTER | DT_SINGLELINE, g_bigFont);
     }
-    if (g_wave->harmonicKey >= 0) {
+    if (g_showKey && g_wave->harmonicKey >= 0) {
         RECT keyRect{g_plot.right - 85, g_plot.top + 8, g_plot.right - 10, g_plot.top + 39};
         RectFill(dc, keyRect, RGB(22, 23, 29));
         Text(dc, harmonic::Camelot(g_wave->harmonicKey), keyRect, RGB(239, 216, 105),
@@ -1896,7 +1898,7 @@ bool ClickBpmBadge(POINT pt) {
     const RECT& plot = selected ? g_plot : g_playingPlot;
     std::shared_ptr<WaveData> wave = selected ? g_wave : g_playingWave;
     const std::wstring& path = selected ? g_selectedPath : g_playingPath;
-    if (!wave || wave->bpm < 80 || path.empty()) return false;
+    if (!g_showBpm || !wave || wave->bpm < 80 || path.empty()) return false;
     RECT badge{plot.left + 10, plot.top + 8, plot.left + 74, plot.top + 39};
     if (!PtInRect(&badge, pt)) return false;
     wave->bpmDouble = !wave->bpmDouble;
@@ -1996,6 +1998,26 @@ void LoadAutoAnalyzePreference() {
     }
 }
 
+// These options control visualization in both waveform panels.
+// Cache contents and CPU-intensive analysis remain unchanged.
+void LoadAnalysisPreferences() {
+    FILE* f = nullptr;
+    if (_wfopen_s(&f, (g_dataDir + L"\\\\analysis_display.txt").c_str(), L"rb") != 0 || !f) return;
+    int bpm = 1, key = 1, gain = 1;
+    if (fscanf_s(f, "%d %d %d", &bpm, &key, &gain) == 3) {
+        g_showBpm = bpm != 0;
+        g_showKey = key != 0;
+        g_normalizeRms = gain != 0;
+    }
+    fclose(f);
+}
+void SaveAnalysisPreferences() {
+    FILE* f = nullptr;
+    if (_wfopen_s(&f, (g_dataDir + L"\\\\analysis_display.txt").c_str(), L"wb") != 0 || !f) return;
+    fprintf(f, "%d %d %d\\n", g_showBpm ? 1 : 0, g_showKey ? 1 : 0, g_normalizeRms ? 1 : 0);
+    fclose(f);
+}
+
 void CancelBatch() {
     ++g_batchGeneration;
     {
@@ -2092,7 +2114,7 @@ void ShowPropertiesPage(int page) {
         AddPrefControl(SS_LEFT, L"STATIC",
             L"Maximum : 30 titres locaux non analyses par lot.",
             219, 197, 425, 24);
-        AddPrefControl(BS_OWNERDRAW, L"BUTTON", L"Batch Load (30 max)",
+        AddPrefControl(BS_OWNERDRAW, L"BUTTON", L"Batch Load",
             219, 237, 199, 29, ID_PREF_BATCH);
         AddPrefControl(BS_OWNERDRAW, L"BUTTON", L"Cancel",
             429, 237, 100, 29, ID_PREF_BATCH_CANCEL);
@@ -2102,15 +2124,27 @@ void ShowPropertiesPage(int page) {
     } else if (page == 1) {
         AddPrefControl(SS_LEFT, L"STATIC", L"Analysis Preferences",
             218, 20, 420, 24);
+        AddPrefControl(SS_LEFT, L"STATIC", L"Waveform / RMS", 219, 62, 423, 23);
+        HWND rms = AddPrefControl(BS_AUTOCHECKBOX | WS_TABSTOP, L"BUTTON",
+            L"Amplify quiet waveforms (display only)", 219, 96, 423, 25, ID_PREF_RMS_GAIN);
+        SendMessageW(rms, BM_SETCHECK, g_normalizeRms ? BST_CHECKED : BST_UNCHECKED, 0);
         AddPrefControl(SS_LEFT, L"STATIC",
-            L"Waveform / RMS\r\n"
-            L"Enveloppe RMS a 50 ms; cache sur disque.\r\n\r\n"
-            L"Key / Camelot\r\n"
-            L"Detection harmonique experimentale (libKeyFinder).\r\n\r\n"
-            L"BPM / Tempo\r\n"
-            L"Estimation BTrack; affichage x2 / demi-tempo par titre.\r\n\r\n"
-            L"Ces calculs sont lies au chargement de la waveform.",
-            219, 68, 423, 265);
+            L"RMS envelope: 50 ms. Playback volume stays unchanged.",
+            235, 127, 421, 24);
+        AddPrefControl(SS_LEFT, L"STATIC", L"Musical key", 219, 166, 423, 23);
+        HWND key = AddPrefControl(BS_AUTOCHECKBOX | WS_TABSTOP, L"BUTTON",
+            L"Show Camelot key on waveform", 219, 200, 423, 25, ID_PREF_SHOW_KEY);
+        SendMessageW(key, BM_SETCHECK, g_showKey ? BST_CHECKED : BST_UNCHECKED, 0);
+        AddPrefControl(SS_LEFT, L"STATIC",
+            L"Experimental harmonic estimate (libKeyFinder).",
+            235, 231, 423, 22);
+        AddPrefControl(SS_LEFT, L"STATIC", L"Tempo analysis", 219, 274, 423, 23);
+        HWND bpm = AddPrefControl(BS_AUTOCHECKBOX | WS_TABSTOP, L"BUTTON",
+            L"Show BPM on waveform", 219, 308, 423, 25, ID_PREF_SHOW_BPM);
+        SendMessageW(bpm, BM_SETCHECK, g_showBpm ? BST_CHECKED : BST_UNCHECKED, 0);
+        AddPrefControl(SS_LEFT, L"STATIC",
+            L"BTrack: click BPM badge to switch half / double tempo.",
+            235, 339, 423, 24);
     } else {
         AddPrefControl(SS_LEFT, L"STATIC", L"WaveCue - About",
             218, 20, 420, 24);
@@ -2141,6 +2175,17 @@ LRESULT CALLBACK PropertiesWndProc(HWND hwnd, UINT message, WPARAM wparam, LPARA
         if (id == ID_PREF_ABOUT) { ShowPropertiesPage(2); return 0; }
         if (id == ID_PREF_BATCH) { StartBatch(); return 0; }
         if (id == ID_PREF_BATCH_CANCEL) { CancelBatch(); return 0; }
+        if ((id == ID_PREF_SHOW_BPM || id == ID_PREF_SHOW_KEY ||
+             id == ID_PREF_RMS_GAIN) && HIWORD(wparam) == BN_CLICKED) {
+            const bool checked = SendMessageW(reinterpret_cast<HWND>(lparam),
+                BM_GETCHECK, 0, 0) == BST_CHECKED;
+            if (id == ID_PREF_SHOW_BPM) g_showBpm = checked;
+            if (id == ID_PREF_SHOW_KEY) g_showKey = checked;
+            if (id == ID_PREF_RMS_GAIN) g_normalizeRms = checked;
+            SaveAnalysisPreferences();
+            if (g_hwnd) InvalidateRect(g_hwnd, nullptr, FALSE);
+            return 0;
+        }
         if (id == ID_PREF_AUTO && HIWORD(wparam) == BN_CLICKED) {
             g_autoAnalyzeSelection =
                 SendMessageW(reinterpret_cast<HWND>(lparam), BM_GETCHECK, 0, 0) == BST_CHECKED;
@@ -2159,17 +2204,30 @@ LRESULT CALLBACK PropertiesWndProc(HWND hwnd, UINT message, WPARAM wparam, LPARA
         const bool selected = item->CtlID == static_cast<UINT>(
             g_propertiesPage == 0 ? ID_PREF_GENERAL :
             g_propertiesPage == 1 ? ID_PREF_ANALYSIS : ID_PREF_ABOUT);
+        const bool nav = item->CtlID == ID_PREF_GENERAL ||
+            item->CtlID == ID_PREF_ANALYSIS || item->CtlID == ID_PREF_ABOUT;
+        const bool pressed = (item->itemState & ODS_SELECTED) != 0;
         HBRUSH background = CreateSolidBrush(
-            (item->itemState & ODS_SELECTED) ? RGB(69, 69, 89) :
-            selected ? RGB(58, 58, 76) : RGB(47, 47, 64));
+            pressed ? RGB(53, 76, 53) : selected && nav ? RGB(53, 76, 53) :
+            RGB(53, 51, 68));
         FillRect(item->hDC, &item->rcItem, background);
         DeleteObject(background);
-        HBRUSH edge = CreateSolidBrush(RGB(124, 124, 150));
-        FrameRect(item->hDC, &item->rcItem, edge);
-        DeleteObject(edge);
+        RECT edgeRect = item->rcItem;
+        HPEN light = CreatePen(PS_SOLID, 1, pressed ? RGB(20, 22, 30) : RGB(123, 119, 142));
+        HPEN dark = CreatePen(PS_SOLID, 1, pressed ? RGB(122, 129, 112) : RGB(16, 17, 25));
+        HGDIOBJ previousPen = SelectObject(item->hDC, light);
+        MoveToEx(item->hDC, edgeRect.left, edgeRect.bottom - 1, nullptr);
+        LineTo(item->hDC, edgeRect.left, edgeRect.top);
+        LineTo(item->hDC, edgeRect.right - 1, edgeRect.top);
+        SelectObject(item->hDC, dark);
+        LineTo(item->hDC, edgeRect.right - 1, edgeRect.bottom - 1);
+        LineTo(item->hDC, edgeRect.left, edgeRect.bottom - 1);
+        SelectObject(item->hDC, previousPen);
+        DeleteObject(light);
+        DeleteObject(dark);
         wchar_t label[128]{};
         GetWindowTextW(item->hwndItem, label, 128);
-        SetTextColor(item->hDC, RGB(124, 225, 66));
+        SetTextColor(item->hDC, selected && nav ? RGB(124, 225, 66) : RGB(221, 224, 229));
         SetBkMode(item->hDC, TRANSPARENT);
         HGDIOBJ old = g_font ? SelectObject(item->hDC, g_font) : nullptr;
         RECT r = item->rcItem;
@@ -2454,6 +2512,7 @@ static int PluginInit() {
     LoadMasterAuto();
     LoadStreamDelay();
     LoadAutoAnalyzePreference();
+    LoadAnalysisPreferences();
     WNDCLASSEXW cls{};
     cls.cbSize = sizeof(cls);
     cls.lpfnWndProc = WaveWndProc;
