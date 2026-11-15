@@ -84,6 +84,9 @@ using wavecue::Cues;
 
 // Plugin state on the Winamp/UI thread.
 HWND g_hwnd = nullptr;
+HWND g_propertiesHwnd = nullptr;
+constexpr UINT ID_PROPERTIES_MENU = 0x1F10;
+constexpr int ID_PROPERTIES_CLOSE = 1101;
 std::atomic<HWND> g_noticeHwnd{nullptr};
 HWND g_winamp = nullptr;
 bool g_winampSubclassInstalled = false;
@@ -1859,6 +1862,86 @@ void ClickPlot(POINT pt) {
     InvalidateRect(g_hwnd, nullptr, FALSE);
 }
 
+// A separate lightweight native Win32 settings window. It deliberately
+// contains no working settings yet: the user can choose them later without
+// changing the carefully packed waveform and cue editor layout.
+LRESULT CALLBACK PropertiesWndProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
+    switch (message) {
+    case WM_COMMAND:
+        if (LOWORD(wparam) == ID_PROPERTIES_CLOSE) {
+            DestroyWindow(hwnd);
+            return 0;
+        }
+        break;
+    case WM_CLOSE:
+        DestroyWindow(hwnd);
+        return 0;
+    case WM_DESTROY:
+        if (g_propertiesHwnd == hwnd) g_propertiesHwnd = nullptr;
+        return 0;
+    default:
+        break;
+    }
+    return DefWindowProcW(hwnd, message, wparam, lparam);
+}
+
+void ShowPropertiesWindow() {
+    if (g_propertiesHwnd && IsWindow(g_propertiesHwnd)) {
+        ShowWindow(g_propertiesHwnd, SW_RESTORE);
+        SetForegroundWindow(g_propertiesHwnd);
+        return;
+    }
+    const wchar_t* className = L"WinampWaveCueProperties1";
+    WNDCLASSEXW cls{};
+    cls.cbSize = sizeof(cls);
+    cls.lpfnWndProc = PropertiesWndProc;
+    cls.hInstance = g_plugin.hDllInstance;
+    cls.lpszClassName = className;
+    cls.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    cls.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1);
+    // Already registered is fine when the window has been opened before.
+    if (!RegisterClassExW(&cls) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS)
+        return;
+    RECT owner{};
+    if (g_hwnd) GetWindowRect(g_hwnd, &owner);
+    const int x = owner.left + 90, y = owner.top + 90;
+    HWND dialog = CreateWindowExW(WS_EX_TOOLWINDOW, className,
+        L"WaveCue - Proprietes", WS_POPUP | WS_CAPTION | WS_SYSMENU,
+        x, y, 430, 190, g_hwnd, nullptr, g_plugin.hDllInstance, nullptr);
+    if (!dialog) return;
+    g_propertiesHwnd = dialog;
+    HWND title = CreateWindowExW(0, L"STATIC", L"PROPRIETES WAVECUE",
+        WS_CHILD | WS_VISIBLE | SS_LEFT, 24, 24, 370, 26,
+        dialog, nullptr, g_plugin.hDllInstance, nullptr);
+    HWND description = CreateWindowExW(0, L"STATIC",
+        L"Les options seront definies dans une prochaine etape.",
+        WS_CHILD | WS_VISIBLE | SS_LEFT, 24, 66, 385, 38,
+        dialog, nullptr, g_plugin.hDllInstance, nullptr);
+    HWND close = CreateWindowExW(0, L"BUTTON", L"Fermer",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
+        310, 112, 94, 28, dialog,
+        reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_PROPERTIES_CLOSE)),
+        g_plugin.hDllInstance, nullptr);
+    if (g_font) {
+        if (title) SendMessageW(title, WM_SETFONT, reinterpret_cast<WPARAM>(g_font), TRUE);
+        if (description) SendMessageW(description, WM_SETFONT, reinterpret_cast<WPARAM>(g_font), TRUE);
+        if (close) SendMessageW(close, WM_SETFONT, reinterpret_cast<WPARAM>(g_font), TRUE);
+    }
+    ShowWindow(dialog, SW_SHOW);
+    UpdateWindow(dialog);
+}
+
+void ShowPropertiesMenu(HWND hwnd, POINT pt) {
+    HMENU menu = CreatePopupMenu();
+    if (!menu) return;
+    AppendMenuW(menu, MF_STRING, ID_PROPERTIES_MENU, L"Proprietes...");
+    SetForegroundWindow(hwnd);
+    const UINT chosen = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON,
+                                       pt.x, pt.y, 0, hwnd, nullptr);
+    DestroyMenu(menu);
+    if (chosen == ID_PROPERTIES_MENU) ShowPropertiesWindow();
+}
+
 LRESULT CALLBACK WaveWndProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
     switch (message) {
     case WM_GETMINMAXINFO: {
@@ -1870,6 +1953,29 @@ LRESULT CALLBACK WaveWndProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
     case WM_CREATE:
         SetTimer(hwnd, TIMER_POLL, 170, nullptr);
         return 0;
+    case WM_SYSCOMMAND:
+        if ((wparam & 0xFFF0) == ID_PROPERTIES_MENU) {
+            ShowPropertiesWindow();
+            return 0;
+        }
+        break;
+    case WM_CONTEXTMENU: {
+        // Right-click on the title/toolbar only; waveform and cues stay untouched.
+        if (reinterpret_cast<HWND>(wparam) != hwnd) break;
+        POINT screen{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+        if (screen.x == -1 && screen.y == -1) {
+            RECT bounds{};
+            GetWindowRect(hwnd, &bounds);
+            screen = {bounds.left + 35, bounds.top + 28};
+        } else {
+            POINT client = screen;
+            ScreenToClient(hwnd, &client);
+            if (client.y < 0 || client.y >= 41 || client.x < 0 || client.x > 140)
+                break;
+        }
+        ShowPropertiesMenu(hwnd, screen);
+        return 0;
+    }
     case WM_SIZE:
         Layout(LOWORD(lparam), HIWORD(lparam));
         InvalidateRect(hwnd, nullptr, FALSE);
@@ -2021,6 +2127,10 @@ static int PluginInit() {
         UnregisterClassW(cls.lpszClassName, g_plugin.hDllInstance);
         return 1;
     }
+    if (HMENU systemMenu = GetSystemMenu(g_hwnd, FALSE)) {
+        AppendMenuW(systemMenu, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(systemMenu, MF_STRING, ID_PROPERTIES_MENU, L"Proprietes...");
+    }
     g_noticeHwnd.store(g_hwnd);
     try { g_worker = std::thread(WorkerMain); }
     catch (...) {
@@ -2065,6 +2175,9 @@ static void PluginQuit() {
     }
     g_taskWake.notify_one();
     if (g_worker.joinable()) g_worker.join();
+    if (g_propertiesHwnd && IsWindow(g_propertiesHwnd))
+        DestroyWindow(g_propertiesHwnd);
+    g_propertiesHwnd = nullptr;
     if (g_hwnd) DestroyWindow(g_hwnd);
     g_hwnd = nullptr;
     if (g_font) DeleteObject(g_font);
