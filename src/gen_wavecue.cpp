@@ -2002,7 +2002,7 @@ void LoadAutoAnalyzePreference() {
 // Cache contents and CPU-intensive analysis remain unchanged.
 void LoadAnalysisPreferences() {
     FILE* f = nullptr;
-    if (_wfopen_s(&f, (g_dataDir + L"\\\\analysis_display.txt").c_str(), L"rb") != 0 || !f) return;
+    if (_wfopen_s(&f, (g_dataDir + L"\\analysis_display.txt").c_str(), L"rb") != 0 || !f) return;
     int bpm = 1, key = 1, gain = 1;
     if (fscanf_s(f, "%d %d %d", &bpm, &key, &gain) == 3) {
         g_showBpm = bpm != 0;
@@ -2013,8 +2013,8 @@ void LoadAnalysisPreferences() {
 }
 void SaveAnalysisPreferences() {
     FILE* f = nullptr;
-    if (_wfopen_s(&f, (g_dataDir + L"\\\\analysis_display.txt").c_str(), L"wb") != 0 || !f) return;
-    fprintf(f, "%d %d %d\\n", g_showBpm ? 1 : 0, g_showKey ? 1 : 0, g_normalizeRms ? 1 : 0);
+    if (_wfopen_s(&f, (g_dataDir + L"\\analysis_display.txt").c_str(), L"wb") != 0 || !f) return;
+    fprintf(f, "%d %d %d\n", g_showBpm ? 1 : 0, g_showKey ? 1 : 0, g_normalizeRms ? 1 : 0);
     fclose(f);
 }
 
