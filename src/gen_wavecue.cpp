@@ -134,7 +134,7 @@ struct WaveData {
     double rmsDisplayGain = 1.0; // visual scaling only; never affects audio
     int harmonicKey = -2; // -2 unknown; -1 uncertain; 0..23 pitch class + mode
     int bpm = -1; // experimental BTrack result; -1 uncertain
-    bool bpmDouble = false; // persisted per track; UI only
+    bool bpmDouble = false; // persisted alternative tempo view (x2 or /2), per track
 };
 std::shared_ptr<WaveData> g_wave;
 std::shared_ptr<WaveData> g_playingWave;
@@ -347,7 +347,7 @@ static_assert(sizeof(CacheHeader) == 44, "Cache header must be stable");
 constexpr uint32_t CACHE_MAGIC = 0x45554357u;
 constexpr uint32_t RMS_CACHE_VERSION = 5; // BPM enabled, re-analyze constructor-only diagnostic caches
 
-// Keep each track's normal/fast display preference independent from analysis.
+// Keep each track's original/alternative tempo preference independent from analysis.
 std::wstring BpmChoicePath(const std::wstring& path) { return CachePath(path) + L".fast"; }
 bool ReadBpmChoice(const std::wstring& path) {
     FILE* f = nullptr;
@@ -357,13 +357,13 @@ bool ReadBpmChoice(const std::wstring& path) {
     fclose(f);
     return c == '1';
 }
-void WriteBpmChoice(const std::wstring& path, bool doubled) {
+void WriteBpmChoice(const std::wstring& path, bool alternative) {
     if (path.empty()) return;
     const std::wstring dest = BpmChoicePath(path);
     const std::wstring temp = dest + L".tmp";
     FILE* f = nullptr;
     if (_wfopen_s(&f, temp.c_str(), L"wb") != 0 || !f) return;
-    bool ok = fputc(doubled ? '1' : '0', f) != EOF;
+    bool ok = fputc(alternative ? '1' : '0', f) != EOF;
     if (fclose(f) != 0) ok = false;
     if (!ok || !MoveFileExW(temp.c_str(), dest.c_str(),
             MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
@@ -1564,7 +1564,19 @@ void DrawWave(HDC dc) {
         RECT bpmRect{g_plot.left + 10, g_plot.top + 8,
                      g_plot.left + 74, g_plot.top + 39};
         RectFill(dc, bpmRect, RGB(22, 23, 29));
-        Text(dc, std::to_wstring(g_wave->bpm * (g_wave->bpmDouble ? 2 : 1)), bpmRect,
+        // BTrack estimates 80-160 BPM. On click, show the other musically
+        // plausible interpretation: half-time for 110+, double-time below.
+        // Represent odd half-tempos exactly (e.g. 135 -> 67.5).
+        std::wstring tempoLabel = std::to_wstring(g_wave->bpm);
+        if (g_wave->bpmDouble) {
+            if (g_wave->bpm >= 110) {
+                tempoLabel = std::to_wstring(g_wave->bpm / 2);
+                if (g_wave->bpm % 2) tempoLabel += L".5";
+            } else {
+                tempoLabel = std::to_wstring(g_wave->bpm * 2);
+            }
+        }
+        Text(dc, tempoLabel, bpmRect,
              RGB(239, 216, 105), DT_CENTER | DT_VCENTER | DT_SINGLELINE, g_bigFont);
     }
     if (g_wave->harmonicKey >= 0) {
@@ -1840,8 +1852,9 @@ bool ClickBpmBadge(POINT pt) {
         g_wave->bpmDouble = wave->bpmDouble;
     if (g_playingWave && _wcsicmp(path.c_str(), g_playingPath.c_str()) == 0)
         g_playingWave->bpmDouble = wave->bpmDouble;
-    g_status = wave->bpmDouble ? L"Tempo rapide memorise (x2)." :
-                                 L"Tempo normal memorise.";
+    g_status = !wave->bpmDouble ? L"Tempo detecte restaure." :
+        (wave->bpm >= 110 ? L"Tempo divise par deux et memorise." :
+                            L"Tempo multiplie par deux et memorise.");
     InvalidateRect(g_hwnd, &g_plot, FALSE);
     InvalidateRect(g_hwnd, &g_playingPlot, FALSE);
     return true;
