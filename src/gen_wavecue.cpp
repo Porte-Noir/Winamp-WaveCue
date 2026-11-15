@@ -1269,8 +1269,8 @@ void PollWinamp() {
         g_playingPath = playPath;
         g_playbackCues = LoadCues(playPath);
         ResetPlayingWave();
-        // Display a waveform automatically only when it was previously
-        // analysed and is already cached. Never queue a decoder here.
+        // Reuse cache first, then optionally decode the playing track when
+        // Auto Load is enabled. Playback and IN/OUT are unaffected.
         if (!playPath.empty()) {
             if (_wcsicmp(playPath.c_str(), g_selectedPath.c_str()) == 0 && g_wave) {
                 g_playingWave = g_wave;
@@ -1286,6 +1286,8 @@ void PollWinamp() {
             RefreshButtonLayout();
             InvalidateRect(g_hwnd, nullptr, FALSE);
         }
+        if (g_autoAnalyzeSelection && !playPath.empty() && !g_playingWave)
+            RequestPlayingLoad();
         g_skipSent = false;
         // The first notification may arrive before the decoder is ready or while
         // playback is still stopped/paused. Keep IN pending until it can be applied.
@@ -2069,50 +2071,58 @@ void ShowPropertiesPage(int page) {
     g_propertyPageControls.clear();
     g_batchProgressLabel = nullptr;
 
-    // Restrained green labels on charcoal, as in classic Winamp Preferences.
+    // Left navigation and recessed content panel follow classic Winamp.
     if (page == 0) {
-        AddPrefControl(SS_LEFT, L"STATIC", L"GENERAL", 23, 62, 465, 22);
-        AddPrefControl(BS_OWNERDRAW, L"BUTTON",
-            g_autoAnalyzeSelection ? L"Auto-analyse selection : ON" :
-                                     L"Auto-analyse selection : OFF",
-            23, 92, 238, 29, ID_PREF_AUTO);
+        AddPrefControl(SS_LEFT, L"STATIC", L"General Preferences", 218, 20, 420, 24);
+        AddPrefControl(BS_AUTOCHECKBOX | WS_TABSTOP, L"BUTTON",
+            L"Auto Load waveform (Selected + Actually Playing)",
+            219, 67, 420, 25, ID_PREF_AUTO);
+        HWND check = g_propertyPageControls.back();
+        SendMessageW(check, BM_SETCHECK,
+            g_autoAnalyzeSelection ? BST_CHECKED : BST_UNCHECKED, 0);
         AddPrefControl(SS_LEFT, L"STATIC",
-            L"OFF : lecture rapide du cache uniquement (recommande).",
-            23, 125, 475, 24);
+            L"Analyse automatiquement les nouveaux titres locaux.\r\n"
+            L"Les fichiers deja en cache s'affichent immediatement.",
+            237, 96, 415, 48);
+        AddPrefControl(SS_LEFT, L"STATIC", L"Playlist preloading", 218, 165, 420, 24);
         AddPrefControl(SS_LEFT, L"STATIC",
-            L"PRECHARGEMENT DE LA PLAYLIST", 23, 168, 470, 22);
-        AddPrefControl(SS_LEFT, L"STATIC",
-            L"Au maximum 30 titres non analyses par lancement.",
-            23, 194, 470, 22);
-        AddPrefControl(BS_OWNERDRAW, L"BUTTON", L"BATCH LOAD (30 MAX)",
-            23, 226, 220, 30, ID_PREF_BATCH);
-        AddPrefControl(BS_OWNERDRAW, L"BUTTON", L"ANNULER",
-            253, 226, 100, 30, ID_PREF_BATCH_CANCEL);
+            L"Maximum : 30 titres locaux non analyses par lot.",
+            219, 197, 425, 24);
+        AddPrefControl(BS_OWNERDRAW, L"BUTTON", L"Batch Load (30 max)",
+            219, 237, 199, 29, ID_PREF_BATCH);
+        AddPrefControl(BS_OWNERDRAW, L"BUTTON", L"Cancel",
+            429, 237, 100, 29, ID_PREF_BATCH_CANCEL);
         g_batchProgressLabel = AddPrefControl(SS_LEFT, L"STATIC",
-            L"", 23, 270, 450, 23);
+            L"", 219, 283, 400, 24);
         UpdatePropertiesProgress();
     } else if (page == 1) {
-        AddPrefControl(SS_LEFT, L"STATIC", L"ANALYSE MUSICALE", 23, 62, 460, 25);
+        AddPrefControl(SS_LEFT, L"STATIC", L"Analysis Preferences",
+            218, 20, 420, 24);
         AddPrefControl(SS_LEFT, L"STATIC",
-            L"Waveform RMS : analyse a la demande, cache sur disque.\r\n"
-            L"Tonalite : libKeyFinder (Camelot).\r\n"
-            L"Tempo : BTrack, affichage alternatif au clic.\r\n\r\n"
-            L"Les controles independants Key/BPM seront ajoutes ici.",
-            23, 98, 460, 180);
+            L"Waveform / RMS\r\n"
+            L"Enveloppe RMS a 50 ms; cache sur disque.\r\n\r\n"
+            L"Key / Camelot\r\n"
+            L"Detection harmonique experimentale (libKeyFinder).\r\n\r\n"
+            L"BPM / Tempo\r\n"
+            L"Estimation BTrack; affichage x2 / demi-tempo par titre.\r\n\r\n"
+            L"Ces calculs sont lies au chargement de la waveform.",
+            219, 68, 423, 265);
     } else {
-        AddPrefControl(SS_LEFT, L"STATIC", L"WAVECUE - A PROPOS",
-            23, 62, 460, 25);
+        AddPrefControl(SS_LEFT, L"STATIC", L"WaveCue - About",
+            218, 20, 420, 24);
         AddPrefControl(SS_LEFT, L"STATIC",
-            L"Ne du besoin d'un DJ independant, Le Porte-Noir,\r\n"
-            L"de preparer des morceaux a la volee dans Winamp classique,\r\n"
-            L"avec des reperes IN/OUT et une waveform legere.\r\n\r\n"
-            L"Conception et essais : Le Porte-Noir et contributeurs WaveCue.\r\n"
-            L"Bibliotheques : libKeyFinder, FFTW, BTrack,\r\n"
-            L"libsamplerate, dr_flac et stb_vorbis.\r\n\r\n"
-            L"Sources WaveCue : licence MIT (fichier LICENSE).\r\n"
-            L"DLL avec dependances GPL : obligations de distribution\r\n"
-            L"a clarifier avant publication d'une version officielle.",
-            23, 94, 470, 225);
+            L"WaveCue est ne du besoin de Le Porte-Noir,\r\n"
+            L"DJ independant, de preparer des morceaux dans\r\n"
+            L"Winamp classique : waveform, cues IN/OUT et\r\n"
+            L"controle immediat en concert ou en diffusion.\r\n\r\n"
+            L"Conception et essais : Le Porte-Noir et les\r\n"
+            L"contributeurs du projet WaveCue.\r\n\r\n"
+            L"Composants : libKeyFinder, FFTW, BTrack,\r\n"
+            L"libsamplerate, dr_flac, stb_vorbis.\r\n\r\n"
+            L"Code source WaveCue : MIT (voir LICENSE).\r\n"
+            L"Distribution binaire : respecter egalement les\r\n"
+            L"licences des bibliotheques integrees.",
+            219, 68, 425, 350);
     }
     InvalidateRect(g_propertiesHwnd, nullptr, TRUE);
 }
@@ -2127,10 +2137,14 @@ LRESULT CALLBACK PropertiesWndProc(HWND hwnd, UINT message, WPARAM wparam, LPARA
         if (id == ID_PREF_ABOUT) { ShowPropertiesPage(2); return 0; }
         if (id == ID_PREF_BATCH) { StartBatch(); return 0; }
         if (id == ID_PREF_BATCH_CANCEL) { CancelBatch(); return 0; }
-        if (id == ID_PREF_AUTO) {
-            g_autoAnalyzeSelection = !g_autoAnalyzeSelection;
+        if (id == ID_PREF_AUTO && HIWORD(wparam) == BN_CLICKED) {
+            g_autoAnalyzeSelection =
+                SendMessageW(reinterpret_cast<HWND>(lparam), BM_GETCHECK, 0, 0) == BST_CHECKED;
             SaveAutoAnalyzePreference();
-            ShowPropertiesPage(0);
+            if (g_autoAnalyzeSelection) {
+                if (!g_selectedPath.empty() && !g_wave) RequestLoad();
+                if (!g_playingPath.empty() && !g_playingWave) RequestPlayingLoad();
+            }
             return 0;
         }
         break;
@@ -2142,12 +2156,13 @@ LRESULT CALLBACK PropertiesWndProc(HWND hwnd, UINT message, WPARAM wparam, LPARA
             g_propertiesPage == 0 ? ID_PREF_GENERAL :
             g_propertiesPage == 1 ? ID_PREF_ANALYSIS : ID_PREF_ABOUT);
         HBRUSH background = CreateSolidBrush(
-            (item->itemState & ODS_SELECTED) ? RGB(70, 73, 86) :
-            selected ? RGB(58, 62, 74) : RGB(37, 37, 53));
+            (item->itemState & ODS_SELECTED) ? RGB(69, 69, 89) :
+            selected ? RGB(58, 58, 76) : RGB(47, 47, 64));
         FillRect(item->hDC, &item->rcItem, background);
         DeleteObject(background);
-        FrameRect(item->hDC, &item->rcItem, static_cast<HBRUSH>(
-            GetStockObject(GRAY_BRUSH)));
+        HBRUSH edge = CreateSolidBrush(RGB(124, 124, 150));
+        FrameRect(item->hDC, &item->rcItem, edge);
+        DeleteObject(edge);
         wchar_t label[128]{};
         GetWindowTextW(item->hwndItem, label, 128);
         SetTextColor(item->hDC, RGB(124, 225, 66));
@@ -2159,16 +2174,30 @@ LRESULT CALLBACK PropertiesWndProc(HWND hwnd, UINT message, WPARAM wparam, LPARA
         if (old) SelectObject(item->hDC, old);
         return TRUE;
     }
-    case WM_CTLCOLORSTATIC: {
+    case WM_CTLCOLORSTATIC:
+    case WM_CTLCOLORBTN: {
         HDC dc = reinterpret_cast<HDC>(wparam);
-        SetTextColor(dc, RGB(124, 225, 66));
-        SetBkColor(dc, RGB(25, 25, 37));
+        SetTextColor(dc, RGB(0, 255, 0));
+        SetBkColor(dc, RGB(47, 47, 64));
         return reinterpret_cast<LRESULT>(g_propertiesBrush);
     }
     case WM_ERASEBKGND: {
         RECT rect{};
         GetClientRect(hwnd, &rect);
-        FillRect(reinterpret_cast<HDC>(wparam), &rect, g_propertiesBrush);
+        HDC dc = reinterpret_cast<HDC>(wparam);
+        FillRect(dc, &rect, g_propertiesBrush);
+        RECT sidebar{11, 11, 191, rect.bottom - 13};
+        RECT content{203, 11, rect.right - 12, rect.bottom - 13};
+        HBRUSH dark = CreateSolidBrush(RGB(27, 27, 39));
+        HBRUSH mid = CreateSolidBrush(RGB(47, 47, 64));
+        FillRect(dc, &sidebar, dark);
+        FillRect(dc, &content, mid);
+        DeleteObject(dark);
+        DeleteObject(mid);
+        HBRUSH border = CreateSolidBrush(RGB(118, 118, 145));
+        FrameRect(dc, &sidebar, border);
+        FrameRect(dc, &content, border);
+        DeleteObject(border);
         return 1;
     }
     case WM_CLOSE:
@@ -2203,22 +2232,22 @@ void ShowPropertiesWindow() {
         return;
     RECT owner{};
     if (g_hwnd) GetWindowRect(g_hwnd, &owner);
-    if (!g_propertiesBrush) g_propertiesBrush = CreateSolidBrush(RGB(25, 25, 37));
+    if (!g_propertiesBrush) g_propertiesBrush = CreateSolidBrush(RGB(47, 47, 64));
     HWND dialog = CreateWindowExW(WS_EX_TOOLWINDOW, className,
-        L"WaveCue - Proprietes", WS_POPUP | WS_CAPTION | WS_SYSMENU,
-        owner.left + 90, owner.top + 90, 525, 375, g_hwnd, nullptr,
+        L"WaveCue Preferences", WS_POPUP | WS_CAPTION | WS_SYSMENU,
+        owner.left + 90, owner.top + 90, 690, 475, g_hwnd, nullptr,
         g_plugin.hDllInstance, nullptr);
     if (!dialog) return;
     g_propertiesHwnd = dialog;
     const struct { const wchar_t* title; int id; } tabs[] = {
-        {L"GENERAL", ID_PREF_GENERAL},
-        {L"ANALYSE", ID_PREF_ANALYSIS},
-        {L"ABOUT", ID_PREF_ABOUT}
+        {L"General Preferences", ID_PREF_GENERAL},
+        {L"Analysis", ID_PREF_ANALYSIS},
+        {L"About WaveCue", ID_PREF_ABOUT}
     };
     for (int i = 0; i < 3; ++i) {
         HWND button = CreateWindowExW(0, L"BUTTON", tabs[i].title,
             WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
-            23 + i * 161, 15, 151, 30, dialog,
+            17, 39 + i * 35, 168, 29, dialog,
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(tabs[i].id)),
             g_plugin.hDllInstance, nullptr);
         if (button && g_font)
