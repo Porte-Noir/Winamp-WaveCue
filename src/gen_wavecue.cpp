@@ -1147,7 +1147,7 @@ void ChangeSelected(int index, const std::wstring& path) {
             g_wave = LoadCache(cacheTask);
         }
         if (g_wave) {
-            Task probe{path, stamp, g_generation.load(), false};
+            Task probe{};
             ApplyAnalysisChoices(probe);
             g_lastAnalysisMetrics = AnalysisMetrics(*g_wave, probe);
             UpdateAnalysisMetricsLabel();
@@ -1240,7 +1240,7 @@ void AcceptWorkerResult() {
     }
     SyncSelectedWaveToPlaying();
     RefreshButtonLayout();
-    g_status = g_wave ? L"Waveform prete. Tonalite experimentale : " + std::wstring(harmonic::Camelot(g_wave->harmonicKey))
+    g_status = g_wave ? L"Waveform prete. " + g_lastAnalysisMetrics
                       : (done->error.empty() ? L"Impossible d'analyser ce fichier." : done->error);
     InvalidateRect(g_hwnd, nullptr, FALSE);
 }
@@ -2084,8 +2084,8 @@ void LoadAutoAnalyzePreference() {
     }
 }
 
-// These options control visualization in both waveform panels.
-// Cache contents and CPU-intensive analysis remain unchanged.
+// BPM and Key settings control both future analysis tasks and badge visibility.
+// Cached RMS data is preserved when analysis is disabled.
 void LoadAnalysisPreferences() {
     FILE* f = nullptr;
     if (_wfopen_s(&f, (g_dataDir + L"\\analysis_display.txt").c_str(), L"rb") != 0 || !f) return;
