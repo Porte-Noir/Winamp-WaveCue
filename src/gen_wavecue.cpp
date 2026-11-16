@@ -97,6 +97,7 @@ int g_propertiesPage = 0;
 bool g_autoAnalyzeSelection = false;
 bool g_showBpm = true, g_showKey = true, g_normalizeRms = true;
 std::atomic<bool> g_analyzeBpm{true}, g_analyzeKey{true};
+std::wstring g_lastAnalysisMetrics = L"Aucune analyse mesuree pendant cette session.";
 std::vector<HWND> g_propertyPageControls;
 HBRUSH g_propertiesBrush = nullptr;
 constexpr int BATCH_LIMIT = 30;
@@ -2045,7 +2046,6 @@ void ClickPlot(POINT pt) {
 // The properties panel uses Win32 controls only: no web runtime or GPU.
 HWND g_batchProgressLabel = nullptr;
 HWND g_analysisMetricsLabel = nullptr;
-std::wstring g_lastAnalysisMetrics = L"Aucune analyse mesuree pendant cette session.";
 
 std::wstring AnalysisMetrics(const WaveData& wave, const Task& task) {
     const std::wstring origin = wave.fromCache ? L"Cache RMS" : L"Nouveau decodage";
