@@ -6,6 +6,7 @@
 // Process bounded blocks in the background worker without allocating a full song.
 #include <algorithm>
 #include <cmath>
+#include <chrono>
 #include <cstdint>
 #include <vector>
 #include "../third_party/libkeyfinder/src/keyfinder.h"
@@ -19,6 +20,8 @@ class Probe {
     size_t analyzedFrames_ = 0;
     size_t flushFrames_ = 0;
     bool failed_ = false;
+    uint64_t processingUs_ = 0;
+    using Clock = std::chrono::steady_clock;
     KeyFinder::KeyFinder engine_;
     KeyFinder::Workspace workspace_;
     std::vector<float> samples_;
@@ -32,7 +35,10 @@ class Probe {
             chunk.addToFrameCount(static_cast<unsigned int>(samples_.size()));
             for (size_t i = 0; i < samples_.size(); ++i)
                 chunk.setSample(static_cast<unsigned int>(i), samples_[i]);
+            const auto before = Clock::now();
             engine_.progressiveChromagram(chunk, workspace_);
+            processingUs_ += static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - before).count());
             samples_.clear();
         } catch (...) {
             failed_ = true;
@@ -61,14 +67,19 @@ public:
         if (samples_.size() >= flushFrames_) Flush();
     }
 
+    uint64_t ProcessingMs() const { return (processingUs_ + 500) / 1000; }
+
     int Estimate() {
         if (failed_ || !rate_ || analyzedFrames_ < static_cast<size_t>(rate_) * 10)
             return -1;
         Flush();
         if (failed_) return -1;
         try {
+            const auto before = Clock::now();
             engine_.finalChromagram(workspace_);
             const auto key = engine_.keyOfChromagram(workspace_);
+            processingUs_ += static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - before).count());
             // KeyFinder's documented A_MAJOR..A_FLAT_MINOR enumeration.
             // Convert to WaveCue's C..B major then C..B minor indexes.
             static constexpr int map[24] = {
