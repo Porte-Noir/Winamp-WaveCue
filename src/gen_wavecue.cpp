@@ -1105,6 +1105,8 @@ void CancelAnalysis() {
 void Layout(int width, int height);
 void RequestLoad();
 void UpdatePropertiesProgress();
+std::wstring AnalysisMetrics(const WaveData& wave, const Task& task);
+void UpdateAnalysisMetricsLabel();
 
 void RefreshButtonLayout() {
     if (!g_hwnd || !IsWindow(g_hwnd)) return;
