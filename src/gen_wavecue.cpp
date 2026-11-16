@@ -96,6 +96,7 @@ constexpr int ID_PREF_SHOW_BPM = 1214, ID_PREF_SHOW_KEY = 1215, ID_PREF_RMS_GAIN
 int g_propertiesPage = 0;
 bool g_autoAnalyzeSelection = false;
 bool g_showBpm = true, g_showKey = true, g_normalizeRms = true;
+std::atomic<bool> g_analyzeBpm{true}, g_analyzeKey{true};
 std::vector<HWND> g_propertyPageControls;
 HBRUSH g_propertiesBrush = nullptr;
 constexpr int BATCH_LIMIT = 30;
@@ -143,7 +144,7 @@ struct WaveData {
     std::vector<uint16_t> rms; // 50ms loudness envelope
     double rmsDisplayGain = 1.0; // visual scaling only; never affects audio
     int harmonicKey = -2; // -2 unknown; -1 uncertain; 0..23 pitch class + mode
-    int bpm = -1; // experimental BTrack result; -1 uncertain
+    int bpm = -2; // -2 skipped; -1 uncertain; 80..160 detected
     bool bpmDouble = false; // persisted alternative tempo view (x2 or /2), per track
 };
 std::shared_ptr<WaveData> g_wave;
@@ -153,7 +154,7 @@ RECT g_playingPlot = {28, 83, 1000, 218};
 
 // Decoding runs exclusively in a background MTA thread.
 struct FileStamp { uint64_t size = 0; uint64_t modified = 0; };
-struct Task { std::wstring path; FileStamp stamp; uint64_t generation = 0; bool playing = false; bool batch = false; };
+struct Task { std::wstring path; FileStamp stamp; uint64_t generation = 0; bool playing = false; bool batch = false; bool doBpm = true; bool doKey = true; };
 struct Result {
     Task task;
     std::shared_ptr<WaveData> wave;
@@ -413,6 +414,15 @@ void WriteKeyCache(const Task& task, int key) {
     } else DeleteFileW(temp.c_str());
 }
 
+bool AnalysisComplete(const WaveData& wave, const Task& task) {
+    return (!task.doBpm || wave.bpm != -2) &&
+           (!task.doKey || wave.harmonicKey != -2);
+}
+void ApplyAnalysisChoices(Task& task) {
+    task.doBpm = g_analyzeBpm.load();
+    task.doKey = g_analyzeKey.load();
+}
+
 bool TaskCurrent(const Task& task) {
     if (task.batch)
         return task.generation == g_batchGeneration.load() && !g_batchPreempt.load();
@@ -497,7 +507,7 @@ std::shared_ptr<WaveData> LoadCache(const Task& task) {
     }
     auto wave = std::make_shared<WaveData>();
     wave->duration_ms = hdr.duration_ms;
-    wave->bpm = hdr.bpm >= 80 && hdr.bpm <= 160 ? hdr.bpm : -1;
+    wave->bpm = hdr.bpm >= 80 && hdr.bpm <= 160 ? hdr.bpm : (hdr.bpm == -2 ? -2 : -1);
     wave->bpmDouble = ReadBpmChoice(task.path);
     wave->peaks.resize(hdr.peak_count);
     if (fread(wave->peaks.data(), sizeof(uint16_t), hdr.peak_count, f) != hdr.peak_count) {
@@ -591,7 +601,7 @@ std::shared_ptr<WaveData> DecodeFlac(const Task& task, std::wstring& error) {
             }
             wave->peaks[bin] = static_cast<uint16_t>(std::max<int>(
                 wave->peaks[bin], std::min(maximum, 32767)));
-            harmonicProbe.Add(static_cast<float>(mixed / (32768.0 * channels)));
+            if (task.doKey) harmonicProbe.Add(static_cast<float>(mixed / (32768.0 * channels)));
             rms.Add(*wave, bin, mixed / (32768.0 * channels));
         }
         if (!error.empty()) break;
@@ -608,7 +618,7 @@ std::shared_ptr<WaveData> DecodeFlac(const Task& task, std::wstring& error) {
     wave->rms.resize(wave->peaks.size(), 0);
     SetRmsDisplayGain(*wave);
     wave->duration_ms = std::max<uint64_t>(1, frameCount * 1000 / rate);
-    wave->harmonicKey = harmonicProbe.Estimate();
+    wave->harmonicKey = task.doKey ? harmonicProbe.Estimate() : ReadKeyCache(task);
     return wave;
 }
 
@@ -660,7 +670,7 @@ std::shared_ptr<WaveData> DecodeOgg(const Task& task, std::wstring& error) {
             }
             wave->peaks[bin] = static_cast<uint16_t>(
                 std::max<int>(wave->peaks[bin], std::min(peak, 32767)));
-            harmonicProbe.Add(static_cast<float>(mixed / (32768.0 * channels)));
+            if (task.doKey) harmonicProbe.Add(static_cast<float>(mixed / (32768.0 * channels)));
             rms.Add(*wave, bin, mixed / (32768.0 * channels));
         }
         if (!error.empty()) break;
@@ -677,7 +687,7 @@ std::shared_ptr<WaveData> DecodeOgg(const Task& task, std::wstring& error) {
     wave->rms.resize(wave->peaks.size(), 0);
     SetRmsDisplayGain(*wave);
     wave->duration_ms = std::max<uint64_t>(1, frames * 1000 / static_cast<uint32_t>(rate));
-    wave->harmonicKey = harmonicProbe.Estimate();
+    wave->harmonicKey = task.doKey ? harmonicProbe.Estimate() : ReadKeyCache(task);
     return wave;
 }
 
@@ -843,7 +853,7 @@ std::shared_ptr<WaveData> DecodeAiff(const Task& task, std::wstring& error) {
             }
             wave->peaks[bin] = static_cast<uint16_t>(
                 std::max<int>(wave->peaks[bin], peak));
-            harmonicProbe.Add(static_cast<float>(mixed / channels));
+            if (task.doKey) harmonicProbe.Add(static_cast<float>(mixed / channels));
             rms.Add(*wave, bin, mixed / channels);
         }
         if (!error.empty()) break;
@@ -861,7 +871,7 @@ std::shared_ptr<WaveData> DecodeAiff(const Task& task, std::wstring& error) {
     wave->rms.resize(wave->peaks.size(), 0);
     SetRmsDisplayGain(*wave);
     wave->duration_ms = std::max<uint64_t>(1, frames * 1000 / rate);
-    wave->harmonicKey = harmonicProbe.Estimate();
+    wave->harmonicKey = task.doKey ? harmonicProbe.Estimate() : ReadKeyCache(task);
     return wave;
 }
 
@@ -936,7 +946,7 @@ std::shared_ptr<WaveData> DecodeWithMF(const Task& task, std::wstring& error) {
                             }
                             wave->peaks[bin] = static_cast<uint16_t>(
                                 std::max<int>(wave->peaks[bin], std::min(maximum, 32767)));
-                            harmonicProbe.Add(static_cast<float>(mixed / (32768.0 * channels)));
+                            if (task.doKey) harmonicProbe.Add(static_cast<float>(mixed / (32768.0 * channels)));
             rms.Add(*wave, bin, mixed / (32768.0 * channels));
                         }
                         buffer->Unlock();
@@ -961,7 +971,7 @@ std::shared_ptr<WaveData> DecodeWithMF(const Task& task, std::wstring& error) {
     wave->rms.resize(wave->peaks.size(), 0);
     SetRmsDisplayGain(*wave);
     wave->duration_ms = std::max<uint64_t>(1, frameCount * 1000 / rate);
-            wave->harmonicKey = harmonicProbe.Estimate();
+            wave->harmonicKey = task.doKey ? harmonicProbe.Estimate() : ReadKeyCache(task);
         }
         else if (wave) { error = L"Aucune donnee audio exploitable."; wave.reset(); }
     }
@@ -1001,7 +1011,11 @@ void WorkerMain() {
             return task.path.size() >= n &&
                 _wcsicmp(task.path.c_str() + task.path.size() - n, ext) == 0;
         };
-        if (hasExt(L".flac")) result->wave = DecodeFlac(task, result->error);
+        // Missing BPM can be estimated from the cached RMS envelope.
+        auto cachedWave = LoadCache(task);
+        if (cachedWave && (!task.doKey || cachedWave->harmonicKey != -2))
+            result->wave = std::move(cachedWave);
+        else if (hasExt(L".flac")) result->wave = DecodeFlac(task, result->error);
         else if (hasExt(L".ogg") || hasExt(L".oga"))
             result->wave = DecodeOgg(task, result->error);
         else if (hasExt(L".aif") || hasExt(L".aiff") || hasExt(L".aifc"))
@@ -1019,7 +1033,8 @@ void WorkerMain() {
         if (result->wave) {
             // BTrack class ABI is consistent across the plugin and static library.
             // Run the experimental BPM estimator after decoding on the worker thread.
-            result->wave->bpm = EstimateBpmFromRms(*result->wave, task);
+            if (task.doBpm && result->wave->bpm == -2)
+                result->wave->bpm = EstimateBpmFromRms(*result->wave, task);
             result->wave->bpmDouble = ReadBpmChoice(task.path);
             if (TaskCurrent(task)) SaveCache(task, *result->wave);
         }
@@ -1107,6 +1122,7 @@ void ChangeSelected(int index, const std::wstring& path) {
         FileStamp stamp{};
         if (ReadFileStamp(path, stamp)) {
             Task cacheTask{path, stamp, g_generation.load(), false};
+            ApplyAnalysisChoices(cacheTask);
             g_wave = LoadCache(cacheTask);
         }
         if (g_wave) {
@@ -1120,8 +1136,14 @@ void ChangeSelected(int index, const std::wstring& path) {
     }
     RefreshButtonLayout();
     InvalidateRect(g_hwnd, nullptr, FALSE);
-    if (g_autoAnalyzeSelection && !g_wave && !g_selectedPath.empty())
-        RequestLoad();
+    if (g_autoAnalyzeSelection && !g_selectedPath.empty()) {
+        FileStamp stamp{};
+        if (ReadFileStamp(g_selectedPath, stamp)) {
+            Task probe{g_selectedPath, stamp};
+            ApplyAnalysisChoices(probe);
+            if (!g_wave || !AnalysisComplete(*g_wave, probe)) RequestLoad();
+        }
+    }
 }
 
 void RequestLoad() {
@@ -1133,11 +1155,12 @@ void RequestLoad() {
         return;
     }
     Task task{g_selectedPath, stamp, ++g_generation};
+    ApplyAnalysisChoices(task);
     if (auto cached = LoadCache(task)) {
-        const bool keyReady = cached->harmonicKey >= -1;
+        const bool ready = AnalysisComplete(*cached, task);
         g_wave = std::move(cached);
         SyncSelectedWaveToPlaying();
-        if (keyReady) {
+        if (ready) {
             g_isLoading = false;
             g_status = L"Waveform et tonalite lues depuis le cache.";
             RefreshButtonLayout();
@@ -1234,16 +1257,17 @@ void RequestPlayingLoad() {
     if (_wcsicmp(path.c_str(), g_selectedPath.c_str()) == 0 && g_wave) {
         g_playingWave = g_wave;
         InvalidateRect(g_hwnd, &g_playingPlot, FALSE);
-        if (g_playingWave->harmonicKey >= -1) return;
+        if (AnalysisComplete(*g_playingWave, task)) return;
         // An old cached waveform can still need harmonic analysis.
     }
     FileStamp stamp{};
     if (!ReadFileStamp(path, stamp)) return;
     Task task{path, stamp, g_playGeneration.load(), true};
+    ApplyAnalysisChoices(task);
     if (auto cached = LoadCache(task)) {
         g_playingWave = std::move(cached);
         InvalidateRect(g_hwnd, &g_playingPlot, FALSE);
-        if (g_playingWave->harmonicKey >= -1) return;
+        if (AnalysisComplete(*g_playingWave, task)) return;
     }
     // Selected Track may already be decoding this exact file.
     // Its completed waveform will be shared with Actually Playing.
@@ -1292,8 +1316,15 @@ void PollWinamp() {
             RefreshButtonLayout();
             InvalidateRect(g_hwnd, nullptr, FALSE);
         }
-        if (g_autoAnalyzeSelection && !playPath.empty() && !g_playingWave)
-            RequestPlayingLoad();
+        if (g_autoAnalyzeSelection && !playPath.empty()) {
+            FileStamp stamp{};
+            if (ReadFileStamp(playPath, stamp)) {
+                Task probe{playPath, stamp};
+                ApplyAnalysisChoices(probe);
+                if (!g_playingWave || !AnalysisComplete(*g_playingWave, probe))
+                    RequestPlayingLoad();
+            }
+        }
         g_skipSent = false;
         // The first notification may arrive before the decoder is ready or while
         // playback is still stopped/paused. Keep IN pending until it can be applied.
@@ -2007,6 +2038,8 @@ void LoadAnalysisPreferences() {
     if (fscanf_s(f, "%d %d %d", &bpm, &key, &gain) == 3) {
         g_showBpm = bpm != 0;
         g_showKey = key != 0;
+        g_analyzeBpm = g_showBpm;
+        g_analyzeKey = g_showKey;
         g_normalizeRms = gain != 0;
     }
     fclose(f);
@@ -2051,7 +2084,9 @@ void StartBatch() {
         FileStamp stamp{};
         if (!ReadFileStamp(path, stamp)) continue;
         Task task{path, stamp, generation, false, true};
-        if (LoadCache(task)) continue;
+        ApplyAnalysisChoices(task);
+        if (auto cached = LoadCache(task))
+            if (AnalysisComplete(*cached, task)) continue;
         pending.push_back(task);
     }
     {
@@ -2133,17 +2168,17 @@ void ShowPropertiesPage(int page) {
             235, 127, 421, 24);
         AddPrefControl(SS_LEFT, L"STATIC", L"Musical key", 219, 166, 423, 23);
         HWND key = AddPrefControl(BS_AUTOCHECKBOX | WS_TABSTOP, L"BUTTON",
-            L"Show Camelot key on waveform", 219, 200, 423, 25, ID_PREF_SHOW_KEY);
+            L"Analyze Key (Camelot)", 219, 200, 423, 25, ID_PREF_SHOW_KEY);
         SendMessageW(key, BM_SETCHECK, g_showKey ? BST_CHECKED : BST_UNCHECKED, 0);
         AddPrefControl(SS_LEFT, L"STATIC",
-            L"Experimental harmonic estimate (libKeyFinder).",
+            L"Skipped when disabled; prior cached keys remain available.",
             235, 231, 423, 22);
         AddPrefControl(SS_LEFT, L"STATIC", L"Tempo analysis", 219, 274, 423, 23);
         HWND bpm = AddPrefControl(BS_AUTOCHECKBOX | WS_TABSTOP, L"BUTTON",
-            L"Show BPM on waveform", 219, 308, 423, 25, ID_PREF_SHOW_BPM);
+            L"Analyze BPM (BTrack)", 219, 308, 423, 25, ID_PREF_SHOW_BPM);
         SendMessageW(bpm, BM_SETCHECK, g_showBpm ? BST_CHECKED : BST_UNCHECKED, 0);
         AddPrefControl(SS_LEFT, L"STATIC",
-            L"BTrack: click BPM badge to switch half / double tempo.",
+            L"Skipped when disabled; BPM can be computed from cached RMS.",
             235, 339, 423, 24);
     } else {
         AddPrefControl(SS_LEFT, L"STATIC", L"WaveCue - About",
@@ -2179,8 +2214,14 @@ LRESULT CALLBACK PropertiesWndProc(HWND hwnd, UINT message, WPARAM wparam, LPARA
              id == ID_PREF_RMS_GAIN) && HIWORD(wparam) == BN_CLICKED) {
             const bool checked = SendMessageW(reinterpret_cast<HWND>(lparam),
                 BM_GETCHECK, 0, 0) == BST_CHECKED;
-            if (id == ID_PREF_SHOW_BPM) g_showBpm = checked;
-            if (id == ID_PREF_SHOW_KEY) g_showKey = checked;
+            if (id == ID_PREF_SHOW_BPM) {
+                g_showBpm = checked;
+                g_analyzeBpm = checked;
+            }
+            if (id == ID_PREF_SHOW_KEY) {
+                g_showKey = checked;
+                g_analyzeKey = checked;
+            }
             if (id == ID_PREF_RMS_GAIN) g_normalizeRms = checked;
             SaveAnalysisPreferences();
             if (g_hwnd) InvalidateRect(g_hwnd, nullptr, FALSE);
