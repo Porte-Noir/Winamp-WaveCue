@@ -146,6 +146,10 @@ struct WaveData {
     int harmonicKey = -2; // -2 unknown; -1 uncertain; 0..23 pitch class + mode
     int bpm = -2; // -2 skipped; -1 uncertain; 80..160 detected
     bool bpmDouble = false; // persisted alternative tempo view (x2 or /2), per track
+    bool fromCache = false;
+    uint64_t decodeMs = 0; // includes streaming KeyFinder
+    uint64_t keyMs = 0;    // processing subset of decodeMs
+    uint64_t bpmMs = 0;
 };
 std::shared_ptr<WaveData> g_wave;
 std::shared_ptr<WaveData> g_playingWave;
@@ -522,6 +526,7 @@ std::shared_ptr<WaveData> LoadCache(const Task& task) {
     fclose(f);
     SetRmsDisplayGain(*wave);
     wave->harmonicKey = ReadKeyCache(task);
+    wave->fromCache = true;
     return wave;
 }
 
@@ -581,7 +586,8 @@ std::shared_ptr<WaveData> DecodeFlac(const Task& task, std::wstring& error) {
     constexpr drflac_uint64 CHUNK = 4096;
     std::vector<drflac_int16> samples(static_cast<size_t>(CHUNK) * channels);
     auto wave = std::make_shared<WaveData>();
-    harmonic::Probe harmonicProbe(static_cast<int>(rate));
+    std::unique_ptr<harmonic::Probe> harmonicProbe;
+    if (task.doKey) harmonicProbe = std::make_unique<harmonic::Probe>(static_cast<int>(rate));
     RmsAccumulator rms;
     const uint64_t bucketFrames = std::max<uint32_t>(1, rate / 20);
     uint64_t frameCount = 0;
@@ -601,7 +607,7 @@ std::shared_ptr<WaveData> DecodeFlac(const Task& task, std::wstring& error) {
             }
             wave->peaks[bin] = static_cast<uint16_t>(std::max<int>(
                 wave->peaks[bin], std::min(maximum, 32767)));
-            if (task.doKey) harmonicProbe.Add(static_cast<float>(mixed / (32768.0 * channels)));
+            if (harmonicProbe) harmonicProbe->Add(static_cast<float>(mixed / (32768.0 * channels)));
             rms.Add(*wave, bin, mixed / (32768.0 * channels));
         }
         if (!error.empty()) break;
@@ -618,7 +624,8 @@ std::shared_ptr<WaveData> DecodeFlac(const Task& task, std::wstring& error) {
     wave->rms.resize(wave->peaks.size(), 0);
     SetRmsDisplayGain(*wave);
     wave->duration_ms = std::max<uint64_t>(1, frameCount * 1000 / rate);
-    wave->harmonicKey = task.doKey ? harmonicProbe.Estimate() : ReadKeyCache(task);
+    wave->harmonicKey = harmonicProbe ? harmonicProbe->Estimate() : ReadKeyCache(task);
+    if (harmonicProbe) wave->keyMs = harmonicProbe->ProcessingMs();
     return wave;
 }
 
@@ -648,7 +655,8 @@ std::shared_ptr<WaveData> DecodeOgg(const Task& task, std::wstring& error) {
     constexpr int chunkFrames = 4096;
     std::vector<short> samples(static_cast<size_t>(chunkFrames) * channels);
     auto wave = std::make_shared<WaveData>();
-    harmonic::Probe harmonicProbe(rate);
+    std::unique_ptr<harmonic::Probe> harmonicProbe;
+    if (task.doKey) harmonicProbe = std::make_unique<harmonic::Probe>(rate);
     RmsAccumulator rms;
     const uint64_t bucketFrames = std::max<uint32_t>(1, static_cast<uint32_t>(rate) / 20);
     const uint64_t expectedFrames = stb_vorbis_stream_length_in_samples(vorbis);
@@ -670,7 +678,7 @@ std::shared_ptr<WaveData> DecodeOgg(const Task& task, std::wstring& error) {
             }
             wave->peaks[bin] = static_cast<uint16_t>(
                 std::max<int>(wave->peaks[bin], std::min(peak, 32767)));
-            if (task.doKey) harmonicProbe.Add(static_cast<float>(mixed / (32768.0 * channels)));
+            if (harmonicProbe) harmonicProbe->Add(static_cast<float>(mixed / (32768.0 * channels)));
             rms.Add(*wave, bin, mixed / (32768.0 * channels));
         }
         if (!error.empty()) break;
@@ -687,7 +695,8 @@ std::shared_ptr<WaveData> DecodeOgg(const Task& task, std::wstring& error) {
     wave->rms.resize(wave->peaks.size(), 0);
     SetRmsDisplayGain(*wave);
     wave->duration_ms = std::max<uint64_t>(1, frames * 1000 / static_cast<uint32_t>(rate));
-    wave->harmonicKey = task.doKey ? harmonicProbe.Estimate() : ReadKeyCache(task);
+    wave->harmonicKey = harmonicProbe ? harmonicProbe->Estimate() : ReadKeyCache(task);
+    if (harmonicProbe) wave->keyMs = harmonicProbe->ProcessingMs();
     return wave;
 }
 
@@ -797,7 +806,8 @@ std::shared_ptr<WaveData> DecodeAiff(const Task& task, std::wstring& error) {
     constexpr size_t chunkFrames = 4096;
     std::vector<unsigned char> samples(chunkFrames * static_cast<size_t>(frameBytes));
     auto wave = std::make_shared<WaveData>();
-    harmonic::Probe harmonicProbe(rate);
+    std::unique_ptr<harmonic::Probe> harmonicProbe;
+    if (task.doKey) harmonicProbe = std::make_unique<harmonic::Probe>(rate);
     RmsAccumulator rms;
     uint64_t frames = 0;
     while (TaskCurrent(task) && frames < totalFrames) {
@@ -853,7 +863,7 @@ std::shared_ptr<WaveData> DecodeAiff(const Task& task, std::wstring& error) {
             }
             wave->peaks[bin] = static_cast<uint16_t>(
                 std::max<int>(wave->peaks[bin], peak));
-            if (task.doKey) harmonicProbe.Add(static_cast<float>(mixed / channels));
+            if (harmonicProbe) harmonicProbe->Add(static_cast<float>(mixed / channels));
             rms.Add(*wave, bin, mixed / channels);
         }
         if (!error.empty()) break;
@@ -871,7 +881,8 @@ std::shared_ptr<WaveData> DecodeAiff(const Task& task, std::wstring& error) {
     wave->rms.resize(wave->peaks.size(), 0);
     SetRmsDisplayGain(*wave);
     wave->duration_ms = std::max<uint64_t>(1, frames * 1000 / rate);
-    wave->harmonicKey = task.doKey ? harmonicProbe.Estimate() : ReadKeyCache(task);
+    wave->harmonicKey = harmonicProbe ? harmonicProbe->Estimate() : ReadKeyCache(task);
+    if (harmonicProbe) wave->keyMs = harmonicProbe->ProcessingMs();
     return wave;
 }
 
@@ -901,7 +912,8 @@ std::shared_ptr<WaveData> DecodeWithMF(const Task& task, std::wstring& error) {
         error = L"Echec Media Foundation (" + stage + L", " + hrCode + L").";
     } else {
         wave = std::make_shared<WaveData>();
-        harmonic::Probe harmonicProbe(static_cast<int>(rate));
+        std::unique_ptr<harmonic::Probe> harmonicProbe;
+    if (task.doKey) harmonicProbe = std::make_unique<harmonic::Probe>(static_cast<int>(rate));
     RmsAccumulator rms;
         const uint64_t bucketFrames = std::max<UINT32>(1, rate / 20); // ~50 ms
         uint64_t frameCount = 0;
@@ -946,7 +958,7 @@ std::shared_ptr<WaveData> DecodeWithMF(const Task& task, std::wstring& error) {
                             }
                             wave->peaks[bin] = static_cast<uint16_t>(
                                 std::max<int>(wave->peaks[bin], std::min(maximum, 32767)));
-                            if (task.doKey) harmonicProbe.Add(static_cast<float>(mixed / (32768.0 * channels)));
+                            if (harmonicProbe) harmonicProbe->Add(static_cast<float>(mixed / (32768.0 * channels)));
             rms.Add(*wave, bin, mixed / (32768.0 * channels));
                         }
                         buffer->Unlock();
@@ -971,7 +983,8 @@ std::shared_ptr<WaveData> DecodeWithMF(const Task& task, std::wstring& error) {
     wave->rms.resize(wave->peaks.size(), 0);
     SetRmsDisplayGain(*wave);
     wave->duration_ms = std::max<uint64_t>(1, frameCount * 1000 / rate);
-            wave->harmonicKey = task.doKey ? harmonicProbe.Estimate() : ReadKeyCache(task);
+            wave->harmonicKey = harmonicProbe ? harmonicProbe->Estimate() : ReadKeyCache(task);
+    if (harmonicProbe) wave->keyMs = harmonicProbe->ProcessingMs();
         }
         else if (wave) { error = L"Aucune donnee audio exploitable."; wave.reset(); }
     }
@@ -1013,6 +1026,7 @@ void WorkerMain() {
         };
         // Missing BPM can be estimated from the cached RMS envelope.
         auto cachedWave = LoadCache(task);
+        const uint64_t decodeStart = GetTickCount64();
         if (cachedWave && (!task.doKey || cachedWave->harmonicKey != -2))
             result->wave = std::move(cachedWave);
         else if (hasExt(L".flac")) result->wave = DecodeFlac(task, result->error);
@@ -1022,6 +1036,8 @@ void WorkerMain() {
             result->wave = DecodeAiff(task, result->error);
         else if (mfReady) result->wave = DecodeWithMF(task, result->error);
         else result->error = L"Windows Media Foundation n'est pas disponible.";
+        if (result->wave && !result->wave->fromCache)
+            result->wave->decodeMs = GetTickCount64() - decodeStart;
         if (!TaskCurrent(task)) {
             if (task.batch && task.generation == g_batchGeneration.load() &&
                 g_batchPreempt.load()) {
@@ -1033,8 +1049,11 @@ void WorkerMain() {
         if (result->wave) {
             // BTrack class ABI is consistent across the plugin and static library.
             // Run the experimental BPM estimator after decoding on the worker thread.
-            if (task.doBpm && result->wave->bpm == -2)
+            if (task.doBpm && result->wave->bpm == -2) {
+                const uint64_t bpmStart = GetTickCount64();
                 result->wave->bpm = EstimateBpmFromRms(*result->wave, task);
+                result->wave->bpmMs = GetTickCount64() - bpmStart;
+            }
             result->wave->bpmDouble = ReadBpmChoice(task.path);
             if (TaskCurrent(task)) SaveCache(task, *result->wave);
         }
@@ -1126,6 +1145,10 @@ void ChangeSelected(int index, const std::wstring& path) {
             g_wave = LoadCache(cacheTask);
         }
         if (g_wave) {
+            Task probe{path, stamp, g_generation.load(), false};
+            ApplyAnalysisChoices(probe);
+            g_lastAnalysisMetrics = AnalysisMetrics(*g_wave, probe);
+            UpdateAnalysisMetricsLabel();
             SyncSelectedWaveToPlaying();
             g_status = g_wave->harmonicKey >= -1
                 ? L"Waveform et tonalite lues depuis le cache."
@@ -1161,6 +1184,8 @@ void RequestLoad() {
         g_wave = std::move(cached);
         SyncSelectedWaveToPlaying();
         if (ready) {
+            g_lastAnalysisMetrics = AnalysisMetrics(*g_wave, task);
+            UpdateAnalysisMetricsLabel();
             g_isLoading = false;
             g_status = L"Waveform et tonalite lues depuis le cache.";
             RefreshButtonLayout();
@@ -1193,6 +1218,10 @@ void AcceptWorkerResult() {
         _wcsicmp(playingDone->task.path.c_str(), g_playingPath.c_str()) == 0) {
         g_playingLoading = false;
         g_playingWave = std::move(playingDone->wave);
+        if (g_playingWave) {
+            g_lastAnalysisMetrics = AnalysisMetrics(*g_playingWave, playingDone->task);
+            UpdateAnalysisMetricsLabel();
+        }
         InvalidateRect(g_hwnd, &g_playingPlot, FALSE);
     }
     std::unique_ptr<Result> done;
@@ -1203,6 +1232,10 @@ void AcceptWorkerResult() {
     if (!done || !TaskCurrent(done->task) || done->task.path != g_selectedPath) return;
     g_isLoading = false;
     g_wave = std::move(done->wave);
+    if (g_wave) {
+        g_lastAnalysisMetrics = AnalysisMetrics(*g_wave, done->task);
+        UpdateAnalysisMetricsLabel();
+    }
     SyncSelectedWaveToPlaying();
     RefreshButtonLayout();
     g_status = g_wave ? L"Waveform prete. Tonalite experimentale : " + std::wstring(harmonic::Camelot(g_wave->harmonicKey))
@@ -2009,6 +2042,27 @@ void ClickPlot(POINT pt) {
 // changing the carefully packed waveform and cue editor layout.
 // The properties panel uses Win32 controls only: no web runtime or GPU.
 HWND g_batchProgressLabel = nullptr;
+HWND g_analysisMetricsLabel = nullptr;
+std::wstring g_lastAnalysisMetrics = L"Aucune analyse mesuree pendant cette session.";
+
+std::wstring AnalysisMetrics(const WaveData& wave, const Task& task) {
+    const std::wstring origin = wave.fromCache ? L"Cache RMS" : L"Nouveau decodage";
+    const std::wstring decode = wave.fromCache ? L"en cache" :
+        std::to_wstring(wave.decodeMs) + L" ms";
+    const std::wstring key = !task.doKey ? L"desactive" :
+        wave.fromCache && wave.keyMs == 0 ? L"en cache" :
+        std::to_wstring(wave.keyMs) + L" ms";
+    const std::wstring bpm = !task.doBpm ? L"desactive" :
+        wave.fromCache && wave.bpmMs == 0 ? L"en cache" :
+        std::to_wstring(wave.bpmMs) + L" ms";
+    return origin + L" | Decode : " + decode +
+        L"\r\nKeyFinder : " + key + L" | BTrack : " + bpm;
+}
+
+void UpdateAnalysisMetricsLabel() {
+    if (g_analysisMetricsLabel && IsWindow(g_analysisMetricsLabel))
+        SetWindowTextW(g_analysisMetricsLabel, g_lastAnalysisMetrics.c_str());
+}
 
 void SaveAutoAnalyzePreference() {
     const std::wstring file = g_dataDir + L"\\auto_analyze.txt";
@@ -2130,6 +2184,7 @@ void ShowPropertiesPage(int page) {
         if (IsWindow(control)) DestroyWindow(control);
     g_propertyPageControls.clear();
     g_batchProgressLabel = nullptr;
+    g_analysisMetricsLabel = nullptr;
 
     // Left navigation and recessed content panel follow classic Winamp.
     if (page == 0) {
@@ -2179,6 +2234,8 @@ void ShowPropertiesPage(int page) {
         AddPrefControl(SS_LEFT, L"STATIC",
             L"Skipped when disabled; BPM can be computed from cached RMS.",
             235, 339, 423, 24);
+        g_analysisMetricsLabel = AddPrefControl(SS_LEFT, L"STATIC",
+            g_lastAnalysisMetrics.c_str(), 219, 370, 425, 48);
     } else {
         AddPrefControl(SS_LEFT, L"STATIC", L"WaveCue - About",
             218, 20, 420, 24);
