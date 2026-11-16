@@ -1252,18 +1252,17 @@ void ResetPlayingWave() {
 void RequestPlayingLoad() {
     if (g_playingPath.empty() || g_playingIndex < 0 || g_playingLoading) return;
     const std::wstring path = g_playingPath;
-    // Sharing an already-loaded selection avoids decoding twice, but only
-    // after the user explicitly clicks the playing waveform's Load button.
+    FileStamp stamp{};
+    if (!ReadFileStamp(path, stamp)) return;
+    Task task{path, stamp, g_playGeneration.load(), true};
+    ApplyAnalysisChoices(task);
+    // Share the selection waveform when it already satisfies the settings.
     if (_wcsicmp(path.c_str(), g_selectedPath.c_str()) == 0 && g_wave) {
         g_playingWave = g_wave;
         InvalidateRect(g_hwnd, &g_playingPlot, FALSE);
         if (AnalysisComplete(*g_playingWave, task)) return;
         // An old cached waveform can still need harmonic analysis.
     }
-    FileStamp stamp{};
-    if (!ReadFileStamp(path, stamp)) return;
-    Task task{path, stamp, g_playGeneration.load(), true};
-    ApplyAnalysisChoices(task);
     if (auto cached = LoadCache(task)) {
         g_playingWave = std::move(cached);
         InvalidateRect(g_hwnd, &g_playingPlot, FALSE);
