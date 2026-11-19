@@ -200,7 +200,7 @@ void SpAddButton(HWND hwnd,int id,const wchar_t* title,int x,int y,int w) {
 LRESULT CALLBACK SpWndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
     switch(msg) {
     case WM_CREATE: {
-        spList=CreateWindowExW(WS_EX_CLIENTEDGE,WC_LISTVIEWW,L"",
+        spList=CreateWindowExW(WS_EX_CLIENTEDGE,L"SysListView32",L"",
             WS_CHILD|WS_VISIBLE|WS_TABSTOP|LVS_REPORT|LVS_SHOWSELALWAYS,
             12,48,920,485,hwnd,(HMENU)(INT_PTR)SP_LIST,g_plugin.hDllInstance,nullptr);
         ListView_SetExtendedListViewStyle(spList,LVS_EX_FULLROWSELECT|LVS_EX_DOUBLEBUFFER);
