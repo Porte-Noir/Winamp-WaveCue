@@ -154,15 +154,23 @@ void SpFindInWinamp() {
         MessageBoxW(spWindow,L"Winamp Playlist Editor is unavailable.",L"Set Planner",MB_OK|MB_ICONINFORMATION);
         return;
     }
+    // The classic Playlist Editor may be owned by a Winamp top-level
+    // window. ForegroundWindow() then returns its root rather than 'pe'.
+    // Previously this produced a false failure on Winamp classic skins.
     ShowWindow(pe,SW_SHOW);
-    SetForegroundWindow(pe);
+    HWND root=GetAncestor(pe,GA_ROOT);
+    if(!root) root=pe;
+    ShowWindow(root,SW_SHOW);
+    SetForegroundWindow(root);
+    BringWindowToTop(pe);
+    SetActiveWindow(root);
     SetFocus(pe);
-    // Classic Winamp's playlist key handling runs through the application's
-    // normal keyboard dispatch loop. Direct SendMessage(WM_KEYDOWN) bypasses
-    // that route and can bring the window forward without changing selection.
-    // Deliver ordinary keyboard input to the active Playlist Editor instead.
-    if(GetForegroundWindow()!=pe) {
-        MessageBoxW(spWindow,L"Winamp Playlist Editor could not receive keyboard focus.",
+    // Allow keyboard delivery if the foreground belongs to the same
+    // Winamp window hierarchy. Do not require exact handle identity.
+    HWND front=GetForegroundWindow();
+    if(front!=root && front!=pe &&
+       GetAncestor(front,GA_ROOT)!=root) {
+        MessageBoxW(spWindow,L"Winamp did not come to the foreground. Click the Playlist Editor, then retry Find.",
                     L"Set Planner - Find",MB_OK|MB_ICONINFORMATION);
         return;
     }
