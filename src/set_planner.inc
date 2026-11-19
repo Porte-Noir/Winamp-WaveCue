@@ -46,7 +46,9 @@ int SpQuality(int index) {
     const int previous=SpNumber(spRows[p].key);
     const int goal=SpAdvance(previous,jump);
     const bool sameLetter=spRows[p].key.back()==spRows[index].key.back();
-    if(cur==goal && sameLetter) return 2;
+    if(cur==goal && (sameLetter || jump==0)) return 2;
+    if(jump==0 && sameLetter &&
+       (cur==SpAdvance(previous,1) || cur==SpAdvance(previous,-1))) return 2;
     const int distance=std::min((cur-goal+12)%12,(goal-cur+12)%12);
     return distance<=1 ? 1 : 0;
 }
@@ -108,6 +110,14 @@ void SpImport() {
             }
         }
         spRows.push_back(std::move(row));
+    }
+    // Unanalysed tracks are automatically put into the separate reserve.
+    // The divider itself is always available to reposition manually.
+    auto knownEnd=std::stable_partition(spRows.begin(),spRows.end(),
+        [](const PlannerRow& r){return !r.key.empty();});
+    if(knownEnd!=spRows.end()) {
+        PlannerRow divider; divider.type=2;
+        spRows.insert(knownEnd,divider);
     }
     SpRender();
 }
@@ -172,6 +182,16 @@ void SpSort(bool selectionOnly) {
     }
     SpRender();
 }
+LRESULT CALLBACK SpListKeyboard(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp,
+                                  UINT_PTR id,DWORD_PTR) {
+    if(msg==WM_KEYDOWN && wp=='A' && (GetKeyState(VK_CONTROL)&0x8000)) {
+        for(int i=0;i<(int)spRows.size();++i)
+            ListView_SetItemState(hwnd,i,LVIS_SELECTED,LVIS_SELECTED);
+        return 0;
+    }
+    if(msg==WM_NCDESTROY) RemoveWindowSubclass(hwnd,SpListKeyboard,id);
+    return DefSubclassProc(hwnd,msg,wp,lp);
+}
 void SpAddButton(HWND hwnd,int id,const wchar_t* title,int x,int y,int w) {
     HWND b=CreateWindowExW(0,L"BUTTON",title,WS_CHILD|WS_VISIBLE|WS_TABSTOP,
         x,y,w,27,hwnd,reinterpret_cast<HMENU>((INT_PTR)id),g_plugin.hDllInstance,nullptr);
@@ -184,6 +204,7 @@ LRESULT CALLBACK SpWndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
             WS_CHILD|WS_VISIBLE|WS_TABSTOP|LVS_REPORT|LVS_SHOWSELALWAYS,
             12,48,920,485,hwnd,(HMENU)(INT_PTR)SP_LIST,g_plugin.hDllInstance,nullptr);
         ListView_SetExtendedListViewStyle(spList,LVS_EX_FULLROWSELECT|LVS_EX_DOUBLEBUFFER);
+        SetWindowSubclass(spList,SpListKeyboard,1,0);
         const wchar_t* labels[]={L"Track",L"#",L"BPM",L"Camelot",L"Transition",L"Lock"};
         const int widths[]={495,43,65,83,120,90};
         for(int j=0;j<6;++j) {
