@@ -3,12 +3,13 @@
 // Intentionally NEVER writes to Winamp's playlist or to disk.
 constexpr int SP_IMPORT=3101, SP_SORT=3102, SP_SORT_SEL=3103, SP_UP=3104,
  SP_DOWN=3105, SP_LOCK=3106, SP_PLUS2=3107, SP_MINUS2=3108,
- SP_PLUS7=3109, SP_MINUS7=3110, SP_END=3111, SP_UNDO=3112;
+ SP_PLUS7=3109, SP_MINUS7=3110, SP_END=3111, SP_UNDO=3112,
+ SP_FIND=3113;
 constexpr int SP_LIST=3190;
 struct PlannerRow {
     int type=0; // 0 = song, 1 = transition, 2 = end of playlist
     std::wstring title, path, key;
-    int bpm=-1, jump=0;
+    int bpm=-1, jump=0, originalIndex=-1;
     bool locked=false;
 };
 HWND spWindow=nullptr, spList=nullptr;
@@ -92,6 +93,7 @@ void SpImport() {
     for(int i=0;i<std::min(total,2000);++i) {
         PlannerRow row;
         row.path=PlaylistPath(i);
+        row.originalIndex=i;
         auto* p=reinterpret_cast<const wchar_t*>(
           SendMessageW(g_winamp,WM_WA_IPC,(WPARAM)i,213 /* IPC_GETPLAYLISTTITLEW */));
         if(p) row.title=p;
@@ -120,6 +122,53 @@ void SpImport() {
         spRows.insert(knownEnd,divider);
     }
     SpRender();
+}
+// Locate a track in Winamp without changing its playback position.
+// Winamp's PE window supports Home/End and arrow navigation just like its UI.
+void SpFindInWinamp() {
+    const int selected=SpSelectedFirst();
+    if(selected<0 || selected>=(int)spRows.size() ||
+       spRows[selected].type!=0 || spRows[selected].path.empty()) return;
+    if(!g_winamp || !IsWindow(g_winamp)) return;
+    const auto& row=spRows[selected];
+    const int count=std::max(0,(int)SendMessageW(g_winamp,WM_WA_IPC,0,IPC_GETLISTLENGTH));
+    int match=-1;
+    // Exact playlist occurrence first, important for duplicated file paths.
+    if(row.originalIndex>=0 && row.originalIndex<count &&
+       _wcsicmp(PlaylistPath(row.originalIndex).c_str(),row.path.c_str())==0)
+        match=row.originalIndex;
+    else {
+        for(int i=0;i<count;++i)
+            if(_wcsicmp(PlaylistPath(i).c_str(),row.path.c_str())==0) {
+                match=i;break;
+            }
+    }
+    if(match<0) {
+        MessageBoxW(spWindow,L"Track not found in the current Winamp playlist.\nRefresh the Planner if the playlist changed.",
+            L"Set Planner - Find",MB_OK|MB_ICONINFORMATION);
+        return;
+    }
+    HWND pe=reinterpret_cast<HWND>(
+        SendMessageW(g_winamp,WM_WA_IPC,1,260 /* IPC_GETWND_PE */));
+    if(!pe || !IsWindow(pe)) {
+        MessageBoxW(spWindow,L"Winamp Playlist Editor is unavailable.",L"Set Planner",MB_OK|MB_ICONINFORMATION);
+        return;
+    }
+    ShowWindow(pe,SW_SHOW);
+    SetForegroundWindow(pe);
+    SetFocus(pe);
+    // Use the genuine Playlist Editor navigation keys. No playback IPC,
+    // playlist rewrite or current-playing-track change is sent here.
+    const bool fromEnd=match>count/2;
+    const UINT first=fromEnd?VK_END:VK_HOME;
+    SendMessageW(pe,WM_KEYDOWN,first,1);
+    SendMessageW(pe,WM_KEYUP,first,0xC0000001);
+    const UINT step=fromEnd?VK_UP:VK_DOWN;
+    const int steps=fromEnd?count-1-match:match;
+    for(int i=0;i<steps;++i) {
+        SendMessageW(pe,WM_KEYDOWN,step,1);
+        SendMessageW(pe,WM_KEYUP,step,0xC0000001);
+    }
 }
 void SpMove(int direction) {
     int i=SpSelectedFirst(), j=i+direction;
@@ -217,6 +266,7 @@ LRESULT CALLBACK SpWndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
         SpAddButton(hwnd,SP_SORT,L"Sort All",145,10,86);
         SpAddButton(hwnd,SP_SORT_SEL,L"Sort Selection",240,10,122);
         SpAddButton(hwnd,SP_UNDO,L"Undo",371,10,70);
+        SpAddButton(hwnd,SP_FIND,L"Find in Winamp",458,10,135);
         SpAddButton(hwnd,SP_UP,L"Up",12,545,60);
         SpAddButton(hwnd,SP_DOWN,L"Down",78,545,60);
         SpAddButton(hwnd,SP_LOCK,L"Toggle Lock",146,545,106);
@@ -226,7 +276,7 @@ LRESULT CALLBACK SpWndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
         SpAddButton(hwnd,SP_MINUS7,L"-7",452,545,58);
         SpAddButton(hwnd,SP_END,L"End of Playlist",520,545,137);
         HWND hint=CreateWindowExW(0,L"STATIC",
-          L"Drag rows / Ctrl+click / Shift+click. Double-click locks. Tracks after END stay in reserve. Read-only.",
+          L"Click the Lock column or double-click a row. Find locates songs in Winamp; no playback is triggered.",
           WS_CHILD|WS_VISIBLE,12,584,905,23,hwnd,nullptr,g_plugin.hDllInstance,nullptr);
         if(hint&&g_font)SendMessageW(hint,WM_SETFONT,(WPARAM)g_font,TRUE);
         return 0;
@@ -234,6 +284,7 @@ LRESULT CALLBACK SpWndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
     case WM_COMMAND:
         switch(LOWORD(wp)) {
         case SP_IMPORT: SpImport();break;
+        case SP_FIND: SpFindInWinamp();break;
         case SP_SORT: SpSort(false);break;
         case SP_SORT_SEL: SpSort(true);break;
         case SP_UP: SpMove(-1);break;
@@ -284,6 +335,16 @@ LRESULT CALLBACK SpWndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
                     spDragFrom=drag->iItem;SetCapture(hwnd);
                 }
                 return 0;
+            }
+            if(hdr->code==NM_CLICK) {
+                auto* hit=reinterpret_cast<NMITEMACTIVATE*>(lp);
+                if(hit->iItem>=0 && hit->iItem<(int)spRows.size() &&
+                   hit->iSubItem==5) {
+                    SpSnapshot();
+                    spRows[hit->iItem].locked=!spRows[hit->iItem].locked;
+                    SpRender(hit->iItem);
+                    return 0;
+                }
             }
             if(hdr->code==NM_DBLCLK) {
                 auto* hit=reinterpret_cast<NMITEMACTIVATE*>(lp);
