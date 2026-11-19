@@ -90,7 +90,7 @@ HWND g_hwnd = nullptr;
 HWND g_propertiesHwnd = nullptr;
 constexpr UINT ID_PROPERTIES_MENU = 0x1F10;
 constexpr int ID_PROPERTIES_CLOSE = 1101;
-constexpr int ID_PREF_GENERAL = 1201, ID_PREF_ANALYSIS = 1202, ID_PREF_ABOUT = 1203;
+constexpr int ID_PREF_GENERAL = 1201, ID_PREF_ANALYSIS = 1202, ID_PREF_ABOUT = 1203, ID_PREF_PLANNER = 1204, ID_PREF_PLANNER_OPEN = 1220;
 constexpr int ID_PREF_BATCH = 1211, ID_PREF_BATCH_CANCEL = 1212, ID_PREF_AUTO = 1213;
 constexpr int ID_PREF_SHOW_BPM = 1214, ID_PREF_SHOW_KEY = 1215, ID_PREF_RMS_GAIN = 1216;
 int g_propertiesPage = 0;
@@ -2106,6 +2106,8 @@ void SaveAnalysisPreferences() {
     fclose(f);
 }
 
+#include "set_planner.inc"
+
 void CancelBatch() {
     ++g_batchGeneration;
     {
@@ -2238,6 +2240,16 @@ void ShowPropertiesPage(int page) {
             235, 339, 423, 24);
         g_analysisMetricsLabel = AddPrefControl(SS_LEFT, L"STATIC",
             g_lastAnalysisMetrics.c_str(), 219, 370, 425, 48);
+    } else if (page == 2) {
+        AddPrefControl(SS_LEFT, L"STATIC", L"Set Planner", 218, 20, 420, 24);
+        AddPrefControl(SS_LEFT, L"STATIC",
+            L"Read-only harmonic sandbox for the Winamp playlist.\r\n"
+            L"Import cached Camelot/BPM, lock tracks and transitions,\r\n"
+            L"sort free tracks, or keep uncertain songs in reserve.\r\n\r\n"
+            L"Changes never alter the real Winamp playlist.",
+            219, 73, 427, 120);
+        AddPrefControl(BS_OWNERDRAW, L"BUTTON", L"Open Set Planner",
+            219, 216, 205, 30, ID_PREF_PLANNER_OPEN);
     } else {
         AddPrefControl(SS_LEFT, L"STATIC", L"WaveCue - About",
             218, 20, 420, 24);
@@ -2265,7 +2277,9 @@ LRESULT CALLBACK PropertiesWndProc(HWND hwnd, UINT message, WPARAM wparam, LPARA
         if (id == ID_PROPERTIES_CLOSE) { DestroyWindow(hwnd); return 0; }
         if (id == ID_PREF_GENERAL) { ShowPropertiesPage(0); return 0; }
         if (id == ID_PREF_ANALYSIS) { ShowPropertiesPage(1); return 0; }
-        if (id == ID_PREF_ABOUT) { ShowPropertiesPage(2); return 0; }
+        if (id == ID_PREF_ABOUT) { ShowPropertiesPage(3); return 0; }
+        if (id == ID_PREF_PLANNER) { ShowPropertiesPage(2); return 0; }
+        if (id == ID_PREF_PLANNER_OPEN) { ShowSetPlanner(); return 0; }
         if (id == ID_PREF_BATCH) { StartBatch(); return 0; }
         if (id == ID_PREF_BATCH_CANCEL) { CancelBatch(); return 0; }
         if ((id == ID_PREF_SHOW_BPM || id == ID_PREF_SHOW_KEY ||
@@ -2302,9 +2316,11 @@ LRESULT CALLBACK PropertiesWndProc(HWND hwnd, UINT message, WPARAM wparam, LPARA
         if (!item || item->CtlType != ODT_BUTTON) break;
         const bool selected = item->CtlID == static_cast<UINT>(
             g_propertiesPage == 0 ? ID_PREF_GENERAL :
-            g_propertiesPage == 1 ? ID_PREF_ANALYSIS : ID_PREF_ABOUT);
+            g_propertiesPage == 1 ? ID_PREF_ANALYSIS :
+            g_propertiesPage == 2 ? ID_PREF_PLANNER : ID_PREF_ABOUT);
         const bool nav = item->CtlID == ID_PREF_GENERAL ||
-            item->CtlID == ID_PREF_ANALYSIS || item->CtlID == ID_PREF_ABOUT;
+            item->CtlID == ID_PREF_ANALYSIS || item->CtlID == ID_PREF_PLANNER ||
+             item->CtlID == ID_PREF_ABOUT;
         const bool pressed = (item->itemState & ODS_SELECTED) != 0;
         HBRUSH background = CreateSolidBrush(
             pressed ? RGB(53, 76, 53) : selected && nav ? RGB(53, 76, 53) :
@@ -2403,9 +2419,10 @@ void ShowPropertiesWindow() {
     const struct { const wchar_t* title; int id; } tabs[] = {
         {L"General Preferences", ID_PREF_GENERAL},
         {L"Analysis", ID_PREF_ANALYSIS},
+        {L"Set Planner", ID_PREF_PLANNER},
         {L"About WaveCue", ID_PREF_ABOUT}
     };
-    for (int i = 0; i < 3; ++i) {
+    for (int i = 0; i < 4; ++i) {
         HWND button = CreateWindowExW(0, L"BUTTON", tabs[i].title,
             WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
             17, 39 + i * 35, 168, 29, dialog,
@@ -2686,6 +2703,8 @@ static void PluginQuit() {
     }
     g_taskWake.notify_one();
     if (g_worker.joinable()) g_worker.join();
+    if (spWindow && IsWindow(spWindow))
+        DestroyWindow(spWindow);
     if (g_propertiesHwnd && IsWindow(g_propertiesHwnd))
         DestroyWindow(g_propertiesHwnd);
     g_propertiesHwnd = nullptr;
