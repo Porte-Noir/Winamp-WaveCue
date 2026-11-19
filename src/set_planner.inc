@@ -157,17 +157,37 @@ void SpFindInWinamp() {
     ShowWindow(pe,SW_SHOW);
     SetForegroundWindow(pe);
     SetFocus(pe);
-    // Use the genuine Playlist Editor navigation keys. No playback IPC,
-    // playlist rewrite or current-playing-track change is sent here.
+    // Classic Winamp's playlist key handling runs through the application's
+    // normal keyboard dispatch loop. Direct SendMessage(WM_KEYDOWN) bypasses
+    // that route and can bring the window forward without changing selection.
+    // Deliver ordinary keyboard input to the active Playlist Editor instead.
+    if(GetForegroundWindow()!=pe) {
+        MessageBoxW(spWindow,L"Winamp Playlist Editor could not receive keyboard focus.",
+                    L"Set Planner - Find",MB_OK|MB_ICONINFORMATION);
+        return;
+    }
     const bool fromEnd=match>count/2;
-    const UINT first=fromEnd?VK_END:VK_HOME;
-    SendMessageW(pe,WM_KEYDOWN,first,1);
-    SendMessageW(pe,WM_KEYUP,first,0xC0000001);
-    const UINT step=fromEnd?VK_UP:VK_DOWN;
+    const WORD first=static_cast<WORD>(fromEnd?VK_END:VK_HOME);
+    const WORD step=static_cast<WORD>(fromEnd?VK_UP:VK_DOWN);
     const int steps=fromEnd?count-1-match:match;
-    for(int i=0;i<steps;++i) {
-        SendMessageW(pe,WM_KEYDOWN,step,1);
-        SendMessageW(pe,WM_KEYUP,step,0xC0000001);
+    std::vector<INPUT> keys;
+    keys.reserve(static_cast<size_t>(steps+1)*2);
+    auto addKey=[&keys](WORD vk) {
+        INPUT down{};down.type=INPUT_KEYBOARD;down.ki.wVk=vk;
+        keys.push_back(down);
+        INPUT up=down;up.ki.dwFlags=KEYEVENTF_KEYUP;
+        keys.push_back(up);
+    };
+    addKey(first);
+    for(int i=0;i<steps;++i) addKey(step);
+    // Keep batches bounded for old Windows input queues.
+    for(size_t i=0;i<keys.size();i+=64) {
+        const UINT batch=static_cast<UINT>(std::min<size_t>(64,keys.size()-i));
+        if(SendInput(batch,keys.data()+i,sizeof(INPUT))!=batch) {
+            MessageBoxW(spWindow,L"Winamp did not receive all navigation keys.",
+                L"Set Planner - Find",MB_OK|MB_ICONINFORMATION);
+            break;
+        }
     }
 }
 void SpMove(int direction) {
