@@ -14,7 +14,7 @@ struct PlannerRow {
 HWND spWindow=nullptr, spList=nullptr;
 std::vector<PlannerRow> spRows, spUndo;
 bool spHasUndo=false;
-int spAnchor=-1;
+int spDragFrom=-1;
 
 int SpNumber(const std::wstring& k) {
     if(k.empty()) return -1;
@@ -226,7 +226,7 @@ LRESULT CALLBACK SpWndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
         SpAddButton(hwnd,SP_MINUS7,L"-7",452,545,58);
         SpAddButton(hwnd,SP_END,L"End of Playlist",520,545,137);
         HWND hint=CreateWindowExW(0,L"STATIC",
-          L"Ctrl+click / Shift+click select. Double-click toggles lock. Tracks after END remain in reserve. Read-only.",
+          L"Drag rows / Ctrl+click / Shift+click. Double-click locks. Tracks after END stay in reserve. Read-only.",
           WS_CHILD|WS_VISIBLE,12,584,905,23,hwnd,nullptr,g_plugin.hDllInstance,nullptr);
         if(hint&&g_font)SendMessageW(hint,WM_SETFONT,(WPARAM)g_font,TRUE);
         return 0;
@@ -251,9 +251,40 @@ LRESULT CALLBACK SpWndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
         case SP_END:SpInsert(2);break;
         case SP_UNDO:if(spHasUndo){spRows=spUndo;spHasUndo=false;SpRender();}break;
         } return 0;
+    case WM_LBUTTONUP: {
+        if(spDragFrom>=0) {
+            POINT pt{};GetCursorPos(&pt);ScreenToClient(spList,&pt);
+            LVHITTESTINFO hit{};hit.pt=pt;
+            int target=ListView_HitTest(spList,&hit);
+            int source=spDragFrom;spDragFrom=-1;
+            if(GetCapture()==hwnd) ReleaseCapture();
+            if(target>=0 && source!=target && !spRows[source].locked) {
+                bool blocked=false;
+                for(int n=std::min(source,target);n<=std::max(source,target);++n)
+                    if(n!=source && spRows[n].locked) blocked=true;
+                if(!blocked) {
+                    SpSnapshot();
+                    PlannerRow moved=std::move(spRows[source]);
+                    spRows.erase(spRows.begin()+source);
+                    spRows.insert(spRows.begin()+target,std::move(moved));
+                    SpRender(target);
+                }
+            }
+            return 0;
+        }
+        break;
+    }
     case WM_NOTIFY: {
         auto* hdr=reinterpret_cast<NMHDR*>(lp);
         if(hdr && hdr->hwndFrom==spList) {
+            if(hdr->code==LVN_BEGINDRAG) {
+                const auto* drag=reinterpret_cast<NMLISTVIEW*>(lp);
+                if(drag->iItem>=0 && drag->iItem<(int)spRows.size()
+                    && !spRows[drag->iItem].locked) {
+                    spDragFrom=drag->iItem;SetCapture(hwnd);
+                }
+                return 0;
+            }
             if(hdr->code==NM_DBLCLK) {
                 auto* hit=reinterpret_cast<NMITEMACTIVATE*>(lp);
                 if(hit->iItem>=0&&hit->iItem<(int)spRows.size()) {
@@ -286,7 +317,7 @@ LRESULT CALLBACK SpWndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
                 ListView_SetItemState(spList,i,LVIS_SELECTED,LVIS_SELECTED);
             return 0;
         } break;
-    case WM_CLOSE:ShowWindow(hwnd,SW_HIDE);return 0;
+    case WM_CLOSE:spDragFrom=-1; if(GetCapture()==hwnd)ReleaseCapture();ShowWindow(hwnd,SW_HIDE);return 0;
     case WM_DESTROY:spList=nullptr;spWindow=nullptr;return 0;
     }
     return DefWindowProcW(hwnd,msg,wp,lp);
