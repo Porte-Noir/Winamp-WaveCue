@@ -41,10 +41,22 @@ int SpQuality(int index) {
     if(SpInReserve(index)) return -1;
     const int cur=SpNumber(spRows[index].key);
     if(cur<0) return -1;
+    // Compare against the last analysed song. Silent separators and
+    // unanalysed tracks remain visible but do not interrupt the harmonic chain.
+    // Preserve an explicit break marker even when unknown tracks intervene.
     int p=index-1, jump=0;
-    if(p>=0 && spRows[p].type==1) { jump=spRows[p].jump; --p; }
-    while(p>=0 && spRows[p].type!=0) --p;
-    if(p<0 || SpNumber(spRows[p].key)<0) return -1;
+    bool hasBreak=false;
+    while(p>=0) {
+        const PlannerRow& prior=spRows[p];
+        if(prior.type==2) return -1; // never bridge End of Playlist
+        if(prior.type==1 && !hasBreak) {
+            jump=prior.jump;
+            hasBreak=true;
+        }
+        if(prior.type==0 && SpNumber(prior.key)>0) break;
+        --p;
+    }
+    if(p<0) return -1;
     const int previous=SpNumber(spRows[p].key);
     const int goal=SpAdvance(previous,jump);
     const bool sameLetter=spRows[p].key.back()==spRows[index].key.back();
