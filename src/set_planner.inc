@@ -304,14 +304,16 @@ int SpTransitionCost(const PlannerRow* from,const PlannerRow& to) {
 }
 constexpr int SP_BPM_SOFT_LIMIT=15;
 constexpr int SP_BPM_WARNING_LIMIT=20;
-int SpTempoCost(const PlannerRow* from,const PlannerRow& to) {
+int SpTempoCost(const PlannerRow* from,const PlannerRow& to,
+                const PlannerRow* harmonicFrom=nullptr) {
     if(!from || from->bpm<=0 || to.bpm<=0) return 0;
     const int difference=abs(from->bpm-to.bpm);
-    // +7 is an intentional energy shift. Keep a small BPM preference
-    // without penalizing the creative transition as a tempo failure.
-    if(SpNumber(from->key)>0 && SpNumber(to.key)>0 &&
-       from->key.back()==to.key.back() &&
-       SpNumber(to.key)==SpAdvance(SpNumber(from->key),7))
+    // Harmonic predecessor and tempo predecessor may differ when BPM
+    // metadata is missing. Judge an intentional +7 by the harmonic one.
+    const PlannerRow* keyFrom=harmonicFrom?harmonicFrom:from;
+    if(SpNumber(keyFrom->key)>0 && SpNumber(to.key)>0 &&
+       keyFrom->key.back()==to.key.back() &&
+       SpNumber(to.key)==SpAdvance(SpNumber(keyFrom->key),7))
         return difference<=SP_BPM_WARNING_LIMIT?difference/5:5;
     // Within 15 BPM, tempo is a light tie-breaker. Above 20,
     // penalize the jump enough for Beam Search to consider another
@@ -382,7 +384,7 @@ std::vector<PlannerRow> SpBeamOrder(const std::vector<PlannerRow>& pool,
                 candidate.path.push_back(j);
                 candidate.last=j;
                 const int cost=SpTransitionCost(previous,pool[j])+
-                               SpTempoCost(tempoPrevious,pool[j]);
+                               SpTempoCost(tempoPrevious,pool[j],previous);
                 candidate.score+=cost;
                 // Stable order for equally good sequences.
                 candidate.orderScore+=abs(j-depth);
