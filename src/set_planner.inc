@@ -194,10 +194,45 @@ void SpUpdateTrackNumber() {
     GetWindowTextW(spTrackNumber,previous,40);
     if(value!=previous) SetWindowTextW(spTrackNumber,value.c_str());
 }
+// Move only through unlocked slots. Locked tracks remain at their exact
+// indices while other tracks can travel across them, with either control.
+int SpNextUnlocked(int from,int direction) {
+    for(int i=from+direction;i>=0 && i<(int)spRows.size();i+=direction)
+        if(!spRows[i].locked) return i;
+    return -1;
+}
+bool SpMoveAcrossLocks(int source,int target) {
+    if(source<0 || source>=(int)spRows.size() ||
+       target<0 || target>=(int)spRows.size() ||
+       source==target || spRows[source].locked) return false;
+    const int direction=target>source?1:-1;
+    // When dropped directly over a locked song, go to the first movable
+    // slot on the opposite side of the lock, in the drag direction.
+    if(spRows[target].locked) {
+        int candidate=target;
+        while(candidate>=0 && candidate<(int)spRows.size() &&
+              spRows[candidate].locked) candidate+=direction;
+        if(candidate<0 || candidate>=(int)spRows.size()) return false;
+        target=candidate;
+    }
+    if(source==target) return false;
+    SpSnapshot();
+    int current=source;
+    while(current!=target) {
+        const int next=SpNextUnlocked(current,direction);
+        if(next<0 || (direction>0 && next>target) ||
+                     (direction<0 && next<target)) break;
+        std::swap(spRows[current],spRows[next]);
+        current=next;
+    }
+    SpRender(current,true);
+    return true;
+}
 void SpMove(int direction) {
-    int i=SpSelectedFirst(), j=i+direction;
-    if(i<0 || j<0 || j>=(int)spRows.size() || spRows[i].locked || spRows[j].locked) return;
-    SpSnapshot(); std::swap(spRows[i],spRows[j]); SpRender(j,true);
+    const int source=SpSelectedFirst();
+    if(source<0 || spRows[source].locked) return;
+    const int target=SpNextUnlocked(source,direction);
+    if(target>=0) SpMoveAcrossLocks(source,target);
 }
 void SpRemoveSelected() {
     if(!spList || spRows.empty()) return;
@@ -496,18 +531,8 @@ LRESULT CALLBACK SpWndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
             int target=ListView_HitTest(spList,&hit);
             int source=spDragFrom;spDragFrom=-1;
             if(GetCapture()==hwnd) ReleaseCapture();
-            if(target>=0 && source!=target && !spRows[source].locked) {
-                bool blocked=false;
-                for(int n=std::min(source,target);n<=std::max(source,target);++n)
-                    if(n!=source && spRows[n].locked) blocked=true;
-                if(!blocked) {
-                    SpSnapshot();
-                    PlannerRow moved=std::move(spRows[source]);
-                    spRows.erase(spRows.begin()+source);
-                    spRows.insert(spRows.begin()+target,std::move(moved));
-                    SpRender(target,true);
-                }
-            }
+            if(target>=0 && source!=target)
+                SpMoveAcrossLocks(source,target);
             return 0;
         }
         break;
