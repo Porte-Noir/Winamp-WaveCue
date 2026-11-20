@@ -75,8 +75,17 @@ int SpQuality(int index) {
     return distance<=1 ? 1 : 0;
 }
 void SpUpdateTrackNumber();
-void SpRender(int focus=-1) {
+void SpRender(int focus=-1,bool followMove=false) {
     if(!spList || !IsWindow(spList)) return;
+    // ListView_DeleteAllItems resets its scroll position. Remember the
+    // visible region before rebuilding so edits do not jump the viewport.
+    const int previousTop=ListView_GetTopIndex(spList);
+    RECT itemRect{};
+    int rowHeight=0;
+    if(ListView_GetItemCount(spList)>0 &&
+       ListView_GetItemRect(spList,0,&itemRect,LVIR_BOUNDS))
+        rowHeight=itemRect.bottom-itemRect.top;
+    if(rowHeight<=0) rowHeight=20;
     SendMessageW(spList,WM_SETREDRAW,FALSE,0);
     ListView_DeleteAllItems(spList);
     int i=0;
@@ -100,9 +109,21 @@ void SpRender(int focus=-1) {
         ListView_SetItemText(spList,i,5,const_cast<wchar_t*>(lock.c_str()));
         ++i;
     }
-    if(focus>=0 && focus<(int)spRows.size()) {
-        ListView_SetItemState(spList,focus,LVIS_SELECTED|LVIS_FOCUSED,LVIS_SELECTED|LVIS_FOCUSED);
-        ListView_EnsureVisible(spList,focus,FALSE);
+    if(focus>=0 && focus<(int)spRows.size())
+        ListView_SetItemState(spList,focus,LVIS_SELECTED|LVIS_FOCUSED,
+                             LVIS_SELECTED|LVIS_FOCUSED);
+    // Restore the viewport after setting selection. Selecting items can
+    // itself scroll the control, especially near the bottom of the window.
+    const int currentTop=ListView_GetTopIndex(spList);
+    if(previousTop!=currentTop)
+        ListView_Scroll(spList,0,(previousTop-currentTop)*rowHeight);
+    // Only Up/Down or a drag should follow the moved row, and even then
+    // scrolling is needed solely when the destination leaves the viewport.
+    if(followMove && focus>=0 && focus<(int)spRows.size()) {
+        const int first=ListView_GetTopIndex(spList);
+        const int visible=std::max(1,ListView_GetCountPerPage(spList));
+        if(focus<first || focus>=first+visible)
+            ListView_EnsureVisible(spList,focus,FALSE);
     }
     SendMessageW(spList,WM_SETREDRAW,TRUE,0);
     InvalidateRect(spList,nullptr,TRUE);
@@ -171,7 +192,7 @@ void SpUpdateTrackNumber() {
 void SpMove(int direction) {
     int i=SpSelectedFirst(), j=i+direction;
     if(i<0 || j<0 || j>=(int)spRows.size() || spRows[i].locked || spRows[j].locked) return;
-    SpSnapshot(); std::swap(spRows[i],spRows[j]); SpRender(j);
+    SpSnapshot(); std::swap(spRows[i],spRows[j]); SpRender(j,true);
 }
 void SpInsert(int type,int jump=0) {
     int selected=SpSelectedFirst();
@@ -405,7 +426,7 @@ LRESULT CALLBACK SpWndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
                     PlannerRow moved=std::move(spRows[source]);
                     spRows.erase(spRows.begin()+source);
                     spRows.insert(spRows.begin()+target,std::move(moved));
-                    SpRender(target);
+                    SpRender(target,true);
                 }
             }
             return 0;
