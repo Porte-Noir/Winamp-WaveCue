@@ -664,6 +664,9 @@ LRESULT CALLBACK SpWndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
             WS_CHILD|WS_VISIBLE|WS_TABSTOP|LVS_REPORT|LVS_SHOWSELALWAYS,
             12,48,920,485,hwnd,(HMENU)(INT_PTR)SP_LIST,g_plugin.hDllInstance,nullptr);
         ListView_SetExtendedListViewStyle(spList,LVS_EX_FULLROWSELECT|LVS_EX_DOUBLEBUFFER);
+        ListView_SetBkColor(spList,RGB(0,0,0));
+        ListView_SetTextBkColor(spList,RGB(0,0,0));
+        ListView_SetTextColor(spList,RGB(199,213,200));
         SetWindowSubclass(spList,SpListKeyboard,1,0);
         const wchar_t* labels[]={L"Track",L"#",L"BPM",L"Camelot",L"Transition",L"Lock"};
         const int widths[]={495,43,65,83,120,90};
@@ -772,8 +775,7 @@ LRESULT CALLBACK SpWndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
                     int i=(int)draw->nmcd.dwItemSpec;
                     if(i>=0&&i<(int)spRows.size()) {
                         int q=SpQuality(i);
-                        draw->clrTextBk=spRows[i].type==2?RGB(45,38,34):
-                          spRows[i].type==1?RGB(44,46,29):RGB(0,0,0);
+                        draw->clrTextBk=RGB(0,0,0);
                         draw->clrText=spRows[i].locked?RGB(186,216,149):
                             q==2?RGB(133,224,120):q==1?RGB(240,209,99):
                             q==0?RGB(237,120,108):RGB(199,213,200);
