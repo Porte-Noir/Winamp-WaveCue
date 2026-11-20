@@ -2,7 +2,7 @@ name: Build Winamp WaveCue 32-bit
 on:
   workflow_dispatch:
   push:
-    branches: [main, 'experimental/**']
+    branches: [main, beta, 'experimental/**']
 jobs:
   build:
     runs-on: windows-2022
