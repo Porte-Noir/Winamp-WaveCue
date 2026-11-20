@@ -102,6 +102,24 @@ int SpQuality(int index) {
         return 1;
     return harmonic;
 }
+std::wstring SpBreakStatus(int index) {
+    if(index<0 || index>=(int)spRows.size() || spRows[index].type!=1)
+        return L"";
+    int prior=index-1;
+    while(prior>=0 && spRows[prior].type==0 &&
+          SpNumber(spRows[prior].key)<0) --prior;
+    int next=index+1;
+    while(next<(int)spRows.size() && spRows[next].type==0 &&
+          SpNumber(spRows[next].key)<0) ++next;
+    if(prior<0 || next>=(int)spRows.size() ||
+       spRows[prior].type!=0 || spRows[next].type!=0 ||
+       SpNumber(spRows[prior].key)<0 || SpNumber(spRows[next].key)<0)
+        return L"BREAK --";
+    return spRows[prior].key.back()==spRows[next].key.back() &&
+           SpNumber(spRows[next].key)==SpAdvance(
+             SpNumber(spRows[prior].key),spRows[index].jump)
+           ? L"BREAK OK" : L"BREAK !";
+}
 void SpUpdateTrackNumber();
 void SpRender(int focus=-1,bool followMove=false) {
     if(!spList || !IsWindow(spList)) return;
@@ -129,7 +147,7 @@ void SpRender(int focus=-1,bool followMove=false) {
         std::wstring bpm=row.bpm>0?std::to_wstring(row.bpm):L"--";
         ListView_SetItemText(spList,i,2,const_cast<wchar_t*>(bpm.c_str()));
         ListView_SetItemText(spList,i,3,const_cast<wchar_t*>(row.key.c_str()));
-        std::wstring status=row.type==2?L"RESERVE":row.type==1?L"BREAK":
+        std::wstring status=row.type==2?L"RESERVE":row.type==1?SpBreakStatus(i):
           SpInReserve(i)?L"UNSORTED":SpQuality(i)==2?L"GREEN":
           SpQuality(i)==1?L"YELLOW":SpQuality(i)==0?L"RED":L"--";
         ListView_SetItemText(spList,i,4,const_cast<wchar_t*>(status.c_str()));
