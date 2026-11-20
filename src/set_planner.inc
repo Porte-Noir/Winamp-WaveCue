@@ -12,7 +12,8 @@ struct PlannerRow {
     int bpm=-1, jump=0, originalIndex=-1;
     bool locked=false;
 };
-HWND spWindow=nullptr, spList=nullptr;
+HWND spWindow=nullptr, spList=nullptr, spTrackNumber=nullptr;
+constexpr UINT_PTR SP_NUMBER_TIMER=3192;
 std::vector<PlannerRow> spRows, spUndo;
 bool spHasUndo=false;
 int spDragFrom=-1;
@@ -53,6 +54,7 @@ int SpQuality(int index) {
     const int distance=std::min((cur-goal+12)%12,(goal-cur+12)%12);
     return distance<=1 ? 1 : 0;
 }
+void SpUpdateTrackNumber();
 void SpRender(int focus=-1) {
     if(!spList || !IsWindow(spList)) return;
     SendMessageW(spList,WM_SETREDRAW,FALSE,0);
@@ -84,6 +86,7 @@ void SpRender(int focus=-1) {
     }
     SendMessageW(spList,WM_SETREDRAW,TRUE,0);
     InvalidateRect(spList,nullptr,TRUE);
+    SpUpdateTrackNumber();
 }
 void SpImport() {
     if(!g_winamp || !IsWindow(g_winamp)) return;
@@ -113,47 +116,37 @@ void SpImport() {
         }
         spRows.push_back(std::move(row));
     }
-    // Unanalysed tracks are automatically put into the separate reserve.
-    // The divider itself is always available to reposition manually.
-    auto knownEnd=std::stable_partition(spRows.begin(),spRows.end(),
-        [](const PlannerRow& r){return !r.key.empty();});
-    if(knownEnd!=spRows.end()) {
-        PlannerRow divider; divider.type=2;
-        spRows.insert(knownEnd,divider);
-    }
+    // Import preserves the Playlist Editor order, including silent separators
+    // and tracks without analysis. Reserve is populated only by Sort All.
     SpRender();
 }
-// Locate a track in Winamp without changing its playback position.
-// Winamp's PE window supports Home/End and arrow navigation just like its UI.
-// Safe lookup: read Winamp's playlist only. The old keyboard synthesizer
-// could target unrelated windows; no simulated input or background timer.
-void SpFindInWinamp() {
-    const int selected=SpSelectedFirst();
-    if(selected<0 || selected>=(int)spRows.size() ||
-       spRows[selected].type!=0 || spRows[selected].path.empty()) return;
-    if(!g_winamp || !IsWindow(g_winamp)) return;
-    const PlannerRow& row=spRows[selected];
+// Live position is read from the current Winamp playlist, never the Planner order.
+// Read-only: no modal dialogs, playlist mutations, or synthesized input.
+int SpCurrentWinampPosition(const PlannerRow& row) {
+    if(row.type!=0 || row.path.empty() || !g_winamp || !IsWindow(g_winamp)) return -1;
     const int count=std::max(0,(int)SendMessageW(g_winamp,WM_WA_IPC,0,IPC_GETLISTLENGTH));
-    int match=-1;
+    // Original occurrence wins if still present; otherwise find the path afresh.
     if(row.originalIndex>=0 && row.originalIndex<count &&
        _wcsicmp(PlaylistPath(row.originalIndex).c_str(),row.path.c_str())==0)
-        match=row.originalIndex;
-    else for(int i=0;i<count;++i)
-        if(_wcsicmp(PlaylistPath(i).c_str(),row.path.c_str())==0) {
-            match=i;break;
-        }
-    if(match<0) {
-        MessageBoxW(spWindow,L"Track missing from the current Winamp playlist. Refresh the Planner.",
-                    L"Set Planner - Locate",MB_OK|MB_ICONINFORMATION);
-        return;
+        return row.originalIndex;
+    for(int i=0;i<count;++i)
+        if(_wcsicmp(PlaylistPath(i).c_str(),row.path.c_str())==0) return i;
+    return -1;
+}
+void SpUpdateTrackNumber() {
+    if(!spTrackNumber || !IsWindow(spTrackNumber)) return;
+    int selected=spList?ListView_GetNextItem(spList,-1,LVNI_FOCUSED):-1;
+    if(selected<0 || selected>=(int)spRows.size() ||
+       !(ListView_GetItemState(spList,selected,LVIS_SELECTED)&LVIS_SELECTED))
+        selected=SpSelectedFirst();
+    std::wstring value=L"--";
+    if(selected>=0 && selected<(int)spRows.size()) {
+        const int i=SpCurrentWinampPosition(spRows[selected]);
+        if(i>=0) value=std::to_wstring(i+1);
     }
-    // Avoid changing the playback cursor (IPC_SETPLAYLISTPOS), playlist
-    // selection, audio or other programs while this Winamp API is investigated.
-    const std::wstring notice=L"Winamp Playlist Editor: track "+
-         std::to_wstring(match+1)+L" of "+std::to_wstring(count)+
-         L".\n\nThis safety version shows the position without sending keys.";
-    MessageBoxW(spWindow,notice.c_str(),L"Set Planner - Locate (safe)",
-                MB_OK|MB_ICONINFORMATION);
+    wchar_t previous[40]{};
+    GetWindowTextW(spTrackNumber,previous,40);
+    if(value!=previous) SetWindowTextW(spTrackNumber,value.c_str());
 }
 void SpMove(int direction) {
     int i=SpSelectedFirst(), j=i+direction;
@@ -251,7 +244,16 @@ LRESULT CALLBACK SpWndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
         SpAddButton(hwnd,SP_SORT,L"Sort All",145,10,86);
         SpAddButton(hwnd,SP_SORT_SEL,L"Sort Selection",240,10,122);
         SpAddButton(hwnd,SP_UNDO,L"Undo",371,10,70);
-        SpAddButton(hwnd,SP_FIND,L"Locate track #",458,10,135);
+        HWND numberLabel=CreateWindowExW(0,L"STATIC",L"WINAMP #",
+            WS_CHILD|WS_VISIBLE|SS_LEFT,465,15,95,21,hwnd,nullptr,
+            g_plugin.hDllInstance,nullptr);
+        if(numberLabel&&g_font) SendMessageW(numberLabel,WM_SETFONT,(WPARAM)g_font,TRUE);
+        spTrackNumber=CreateWindowExW(0,L"STATIC",L"--",
+            WS_CHILD|WS_VISIBLE|SS_CENTER|SS_SUNKEN,563,9,64,28,hwnd,
+            nullptr,g_plugin.hDllInstance,nullptr);
+        if(spTrackNumber&&g_bigFont)
+            SendMessageW(spTrackNumber,WM_SETFONT,(WPARAM)g_bigFont,TRUE);
+        SetTimer(hwnd,SP_NUMBER_TIMER,500,nullptr);
         SpAddButton(hwnd,SP_UP,L"Up",12,545,60);
         SpAddButton(hwnd,SP_DOWN,L"Down",78,545,60);
         SpAddButton(hwnd,SP_LOCK,L"Toggle Lock",146,545,106);
@@ -261,15 +263,17 @@ LRESULT CALLBACK SpWndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
         SpAddButton(hwnd,SP_MINUS7,L"-7",452,545,58);
         SpAddButton(hwnd,SP_END,L"End of Playlist",520,545,137);
         HWND hint=CreateWindowExW(0,L"STATIC",
-          L"Click Lock or double-click a row. Locate shows the Winamp track number; no keyboard automation.",
+          L"Select any track to see its current Winamp number. Sort All moves unanalysed free tracks to reserve.",
           WS_CHILD|WS_VISIBLE,12,584,905,23,hwnd,nullptr,g_plugin.hDllInstance,nullptr);
         if(hint&&g_font)SendMessageW(hint,WM_SETFONT,(WPARAM)g_font,TRUE);
         return 0;
     }
+    case WM_TIMER:
+        if(wp==SP_NUMBER_TIMER) {SpUpdateTrackNumber();return 0;}
+        break;
     case WM_COMMAND:
         switch(LOWORD(wp)) {
         case SP_IMPORT: SpImport();break;
-        case SP_FIND: SpFindInWinamp();break;
         case SP_SORT: SpSort(false);break;
         case SP_SORT_SEL: SpSort(true);break;
         case SP_UP: SpMove(-1);break;
@@ -313,6 +317,9 @@ LRESULT CALLBACK SpWndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
     case WM_NOTIFY: {
         auto* hdr=reinterpret_cast<NMHDR*>(lp);
         if(hdr && hdr->hwndFrom==spList) {
+            if(hdr->code==LVN_ITEMCHANGED || hdr->code==NM_CLICK) {
+                SpUpdateTrackNumber();
+            }
             if(hdr->code==LVN_BEGINDRAG) {
                 const auto* drag=reinterpret_cast<NMLISTVIEW*>(lp);
                 if(drag->iItem>=0 && drag->iItem<(int)spRows.size()
@@ -364,7 +371,7 @@ LRESULT CALLBACK SpWndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
             return 0;
         } break;
     case WM_CLOSE:spDragFrom=-1; if(GetCapture()==hwnd)ReleaseCapture();ShowWindow(hwnd,SW_HIDE);return 0;
-    case WM_DESTROY:spList=nullptr;spWindow=nullptr;return 0;
+    case WM_DESTROY:KillTimer(hwnd,SP_NUMBER_TIMER);spTrackNumber=nullptr;spList=nullptr;spWindow=nullptr;return 0;
     }
     return DefWindowProcW(hwnd,msg,wp,lp);
 }
@@ -383,5 +390,6 @@ void ShowSetPlanner() {
     if(spWindow) {
         ShowWindow(spWindow,SW_SHOW);UpdateWindow(spWindow);
         if(spRows.empty()) SpImport();else SpRender();
+        SpUpdateTrackNumber();
     }
 }
