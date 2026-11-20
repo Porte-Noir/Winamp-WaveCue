@@ -36,7 +36,7 @@ bool SpInReserve(int pos) {
         if(spRows[i].type==2) return true;
     return false;
 }
-int SpQuality(int index) {
+int SpHarmonicQuality(int index) {
     if(index<0 || index>=(int)spRows.size() || spRows[index].type!=0) return -1;
     if(SpInReserve(index)) return -1;
     const int cur=SpNumber(spRows[index].key);
@@ -73,6 +73,22 @@ int SpQuality(int index) {
     if(jump==0 && cur==previous) return 1; // relative major/minor
     const int distance=std::min((cur-goal+12)%12,(goal-cur+12)%12);
     return distance<=1 ? 1 : 0;
+}
+// A good harmonic transition with excessive tempo separation is yellow,
+// not green. Red harmonic transitions remain red regardless of BPM.
+int SpQuality(int index) {
+    const int harmonic=SpHarmonicQuality(index);
+    if(harmonic!=2 || spRows[index].bpm<=0) return harmonic;
+    for(int p=index-1;p>=0;--p) {
+        const PlannerRow& prior=spRows[p];
+        if(prior.type==2) break;
+        if(prior.type==0 && SpNumber(prior.key)>0) {
+            if(prior.bpm>0 &&
+               abs(prior.bpm-spRows[index].bpm)>20) return 1;
+            break;
+        }
+    }
+    return harmonic;
 }
 void SpUpdateTrackNumber();
 void SpRender(int focus=-1,bool followMove=false) {
@@ -274,9 +290,18 @@ int SpTransitionCost(const PlannerRow* from,const PlannerRow& to) {
     if(next==prior) return 70; // parallel A/B: preferable to an unrelated key
     return 145;
 }
+constexpr int SP_BPM_SOFT_LIMIT=15;
+constexpr int SP_BPM_WARNING_LIMIT=20;
 int SpTempoCost(const PlannerRow* from,const PlannerRow& to) {
     if(!from || from->bpm<=0 || to.bpm<=0) return 0;
-    return std::min(30,abs(from->bpm-to.bpm))/6;
+    const int difference=abs(from->bpm-to.bpm);
+    // Within 15 BPM, tempo is a light tie-breaker. Above 20,
+    // penalize the jump enough for Beam Search to consider another
+    // harmonic route, while still permitting it if choices are limited.
+    if(difference<=SP_BPM_SOFT_LIMIT) return difference/5;
+    if(difference<=SP_BPM_WARNING_LIMIT)
+        return 3+(difference-SP_BPM_SOFT_LIMIT)*2;
+    return 13+std::min(160,(difference-SP_BPM_WARNING_LIMIT)*4);
 }
 // Fixed boundaries are never crossed. Unanalysed tracks can be skipped
 // when determining the harmonic reference, as in SpQuality.
