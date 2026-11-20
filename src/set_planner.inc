@@ -63,7 +63,7 @@ int SpHarmonicQuality(int index) {
     // Explicit placeholders and automatic +2/+7/-2 transitions are valid.
     // Keep the letter (A/B) distinction, unless the explicit marker guides
     // the change, in which case its numeric target is the intention.
-    if(jump!=0 && cur==goal) return 2;
+    if(jump!=0 && cur==goal && sameLetter) return 2;
     if(jump==0 && sameLetter) {
         if(cur==previous || cur==SpAdvance(previous,1) ||
            cur==SpAdvance(previous,-1) || cur==SpAdvance(previous,2) ||
@@ -341,6 +341,26 @@ const PlannerRow* SpNeighbourBpm(int from,int step) {
     }
     return nullptr;
 }
+// Explicit break markers are directives, not weights in the scoring model.
+// For the first analysed song following a marker, the Camelot number and
+// A/B letter must match exactly the last analysed song + the marked jump.
+struct SpBreakConstraint {
+    const PlannerRow* anchor=nullptr;
+    int jump=0;
+};
+SpBreakConstraint SpBreakBeforeRun(int firstSlot) {
+    int i=firstSlot-1;
+    while(i>=0 && spRows[i].type==0 && SpNumber(spRows[i].key)<0) --i;
+    if(i<0 || spRows[i].type!=1) return {};
+    const int shift=spRows[i].jump;
+    const PlannerRow* anchor=SpNeighbourKey(i-1,-1);
+    return {anchor,shift};
+}
+bool SpBreakMatches(const PlannerRow& before,const PlannerRow& next,int shift) {
+    const int a=SpNumber(before.key),b=SpNumber(next.key);
+    return a>0 && b>0 && before.key.back()==next.key.back() &&
+           b==SpAdvance(a,shift);
+}
 struct SpBeamNode {
     std::vector<int> path;
     std::vector<unsigned char> used;
@@ -351,9 +371,21 @@ struct SpBeamNode {
 std::vector<PlannerRow> SpBeamOrder(const std::vector<PlannerRow>& pool,
                                     const PlannerRow* before,
                                     const PlannerRow* after,
-                                    const PlannerRow* beforeTempo) {
+                                    const PlannerRow* beforeTempo,
+                                    SpBreakConstraint forced) {
     const int n=(int)pool.size();
     if(n<=1) return pool;
+    // A hard break is enforced only if the selected run actually contains
+    // a matching key. If no such song exists, keep the segment as it was;
+    // the marker remains visibly unsatisfied rather than silently weakened.
+    bool hasMatch=false;
+    if(forced.anchor) {
+        for(const auto& song:pool)
+            if(SpBreakMatches(*forced.anchor,song,forced.jump)) {
+                hasMatch=true;break;
+            }
+        if(!hasMatch) return pool;
+    }
     constexpr size_t width=96;
     std::vector<SpBeamNode> beam(1);
     beam[0].used.assign(n,0);
@@ -377,6 +409,11 @@ std::vector<PlannerRow> SpBeamOrder(const std::vector<PlannerRow>& pool,
                 }
             for(int j=0;j<n;++j) {
                 if(node.used[j]) continue;
+                // Hard constraint on the FIRST analysed track after a marker.
+                // Silent tracks are transparent to harmonic comparisons.
+                if(forced.anchor && node.path.empty() && hasMatch &&
+                   !SpBreakMatches(*forced.anchor,pool[j],forced.jump))
+                    continue;
                 // Keep unknown/silent songs at the end of the movable run.
                 if(hasKnown && SpNumber(pool[j].key)<0) continue;
                 SpBeamNode candidate=node;
@@ -475,7 +512,11 @@ void SpSort(bool selectionOnly) {
                     after=&next;
             }
             const PlannerRow* beforeTempo=SpNeighbourBpm(firstSlot-1,-1);
-            const auto optimized=SpBeamOrder(run,before,after,beforeTempo);
+            const SpBreakConstraint forced=SpBreakBeforeRun(firstSlot);
+            // The marker's predecessor is the real harmonic starting point,
+            // even though the marker separates the two sorted sections.
+            if(forced.anchor) before=forced.anchor;
+            const auto optimized=SpBeamOrder(run,before,after,beforeTempo,forced);
             for(int j=cursor;j<last;++j)
                 spRows[slots[j]]=optimized[j-cursor];
             cursor=last;
