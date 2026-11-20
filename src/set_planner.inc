@@ -173,17 +173,19 @@ void SpSort(bool selectionOnly) {
             if(i<(int)selection.size()) selection[i]=true;
     }
     SpSnapshot();
-    // Every locked row, transition and reserve marker forms a fixed boundary.
-    // Free songs may be rearranged within each section, never across boundaries.
-    int start=0, reference=1;
+    // Locked rows, breaks, and End of Playlist are hard boundaries.
+    // No existing locked position or manual break can move during sorting.
+    int start=0,reference=1;
     while(start<(int)spRows.size()) {
-        if(spRows[start].type==2) break; // reserve stays untouched
+        if(spRows[start].type==2) break; // reserve is not sorted
         if(spRows[start].type==1) {
-            reference=SpAdvance(reference,spRows[start].jump); ++start; continue;
+            reference=SpAdvance(reference,spRows[start].jump);
+            ++start;continue;
         }
         if(spRows[start].locked) {
-            if(SpNumber(spRows[start].key)>0) reference=SpNumber(spRows[start].key);
-            ++start; continue;
+            if(SpNumber(spRows[start].key)>0)
+                reference=SpNumber(spRows[start].key);
+            ++start;continue;
         }
         int finish=start;
         while(finish<(int)spRows.size() && spRows[finish].type==0 &&
@@ -193,22 +195,58 @@ void SpSort(bool selectionOnly) {
         for(int i=start;i<finish;++i) if(selection[i]) {
             slots.push_back(i);pool.push_back(spRows[i]);
         }
-        std::stable_sort(pool.begin(),pool.end(),[reference](const PlannerRow& a,const PlannerRow& b){
+        std::stable_sort(pool.begin(),pool.end(),[reference](const PlannerRow& a,
+                                                              const PlannerRow& b) {
             const int ka=SpNumber(a.key),kb=SpNumber(b.key);
             if(ka<0 || kb<0) return ka>=0 && kb<0;
-            const int da=(ka-reference+12)%12,db=(kb-reference+12)%12;
+            // Each uninterrupted section starts with its inherited Camelot
+            // reference. This is purely numeric; BPM never outranks key.
+            const int da=(ka-reference+12)%12, db=(kb-reference+12)%12;
             if(da!=db) return da<db;
+            // Major/minor are distinct even if their Camelot number matches.
             if(a.key!=b.key) return a.key<b.key;
             if(a.bpm<0 || b.bpm<0) return a.bpm>=0 && b.bpm<0;
             return a.bpm<b.bpm;
         });
-        for(size_t j=0;j<slots.size();++j) spRows[slots[j]]=std::move(pool[j]);
+        for(size_t j=0;j<slots.size();++j)
+            spRows[slots[j]]=std::move(pool[j]);
         for(int i=start;i<finish;++i)
-            if(SpNumber(spRows[i].key)>0) reference=SpNumber(spRows[i].key);
+            if(SpNumber(spRows[i].key)>0)
+                reference=SpNumber(spRows[i].key);
         start=finish;
+    }
+    if(!selectionOnly) {
+        // When the final active section has no fixed anchors after it,
+        // unscanned tracks at its tail become the reserve. This cannot shift
+        // any locked row or manually positioned transition.
+        int end=(int)spRows.size();
+        for(int i=0;i<(int)spRows.size();++i)
+            if(spRows[i].type==2) {end=i;break;}
+        int fixed=-1;
+        for(int i=0;i<end;++i)
+            if(spRows[i].type!=0 || spRows[i].locked) fixed=i;
+        int firstUnknown=end;
+        while(firstUnknown>fixed+1 && firstUnknown>0 &&
+              spRows[firstUnknown-1].type==0 &&
+              SpNumber(spRows[firstUnknown-1].key)<0 &&
+              !spRows[firstUnknown-1].locked)
+            --firstUnknown;
+        if(firstUnknown<end) {
+            if(end==(int)spRows.size()) {
+                PlannerRow divider;divider.type=2;
+                spRows.insert(spRows.begin()+firstUnknown,divider);
+            } else if(!spRows[end].locked) {
+                // Move an existing unlocked divider upward, preserving all
+                // song order within both the reserve and active section.
+                PlannerRow divider=std::move(spRows[end]);
+                spRows.erase(spRows.begin()+end);
+                spRows.insert(spRows.begin()+firstUnknown,std::move(divider));
+            }
+        }
     }
     SpRender();
 }
+
 LRESULT CALLBACK SpListKeyboard(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp,
                                   UINT_PTR id,DWORD_PTR) {
     if(msg==WM_KEYDOWN && wp=='A' && (GetKeyState(VK_CONTROL)&0x8000)) {
