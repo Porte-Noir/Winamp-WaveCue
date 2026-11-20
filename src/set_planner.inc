@@ -262,6 +262,22 @@ void SpSort(bool selectionOnly) {
         int lastKey=reference;
         wchar_t lastLetter=0;
         int lastBpm=-1;
+        // Sort Selection starts from the preceding analysed song, rather
+        // than resetting at Camelot 1 or the start of a movable section.
+        // Unknown / silent tracks are transparent for harmonic reference.
+        // A break or reserve marker terminates the lookup boundary.
+        if(!slots.empty()) {
+            for(int prior=slots.front()-1;prior>=0;--prior) {
+                const PlannerRow& previous=spRows[prior];
+                if(previous.type==1 || previous.type==2) break;
+                if(previous.type==0 && SpNumber(previous.key)>0) {
+                    lastKey=SpNumber(previous.key);
+                    lastLetter=previous.key.back();
+                    lastBpm=previous.bpm;
+                    break;
+                }
+            }
+        }
         std::vector<PlannerRow> ordered;
         ordered.reserve(pool.size());
         while(!pool.empty()) {
