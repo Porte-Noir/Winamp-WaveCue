@@ -125,6 +125,46 @@ void SpImport() {
 }
 // Locate a track in Winamp without changing its playback position.
 // Winamp's PE window supports Home/End and arrow navigation just like its UI.
+constexpr UINT_PTR SP_FIND_TIMER=3191;
+int spFindTarget=-1,spFindLast=-2,spFindStalls=0,spFindTicks=0;
+HWND spFindPe=nullptr;
+void SpStopFind() {
+    if(spWindow && IsWindow(spWindow)) KillTimer(spWindow,SP_FIND_TIMER);
+    spFindTarget=-1;spFindPe=nullptr;spFindLast=-2;
+}
+void SpSendKey(WORD vk) {
+    INPUT pair[2]{};
+    pair[0].type=INPUT_KEYBOARD;
+    pair[0].ki.wVk=vk;
+    pair[1]=pair[0];
+    pair[1].ki.dwFlags=KEYEVENTF_KEYUP;
+    SendInput(2,pair,sizeof(INPUT));
+}
+void SpFindTick() {
+    if(spFindTarget<0 || !spFindPe || !IsWindow(spFindPe) ||
+       !g_winamp || !IsWindow(g_winamp)) { SpStopFind();return; }
+    // Avoid drifting through the list if Winamp is not reacting to a key.
+    if(++spFindTicks>2400) {SpStopFind();return;}
+    const int current=(int)SendMessageW(g_winamp,WM_WA_IPC,
+                          (WPARAM)-1,IPC_PLAYLIST_GET_NEXT_SELECTED);
+    if(current==spFindTarget) {SpStopFind();return;}
+    if(current==spFindLast) {
+        if(++spFindStalls>=8) {
+            SpStopFind();
+            MessageBoxW(spWindow,L"Playlist Editor selection did not move. Find stopped safely.",
+                        L"Set Planner - Find",MB_OK|MB_ICONINFORMATION);
+            return;
+        }
+    } else spFindStalls=0;
+    spFindLast=current;
+    const int delta=spFindTarget-current;
+    // One keypress per UI cycle, allowing the classic Winamp event loop
+    // to consume each event. Never flood the input queue.
+    WORD key=current<0 ? VK_HOME :
+        delta>30 ? VK_NEXT : delta< -30 ? VK_PRIOR :
+        delta>0 ? VK_DOWN : VK_UP;
+    SpSendKey(key);
+}
 void SpFindInWinamp() {
     const int selected=SpSelectedFirst();
     if(selected<0 || selected>=(int)spRows.size() ||
@@ -133,30 +173,22 @@ void SpFindInWinamp() {
     const auto& row=spRows[selected];
     const int count=std::max(0,(int)SendMessageW(g_winamp,WM_WA_IPC,0,IPC_GETLISTLENGTH));
     int match=-1;
-    // Exact playlist occurrence first, important for duplicated file paths.
     if(row.originalIndex>=0 && row.originalIndex<count &&
        _wcsicmp(PlaylistPath(row.originalIndex).c_str(),row.path.c_str())==0)
         match=row.originalIndex;
-    else {
-        for(int i=0;i<count;++i)
-            if(_wcsicmp(PlaylistPath(i).c_str(),row.path.c_str())==0) {
-                match=i;break;
-            }
-    }
+    else for(int i=0;i<count;++i)
+        if(_wcsicmp(PlaylistPath(i).c_str(),row.path.c_str())==0) {match=i;break;}
     if(match<0) {
-        MessageBoxW(spWindow,L"Track not found in the current Winamp playlist.\nRefresh the Planner if the playlist changed.",
+        MessageBoxW(spWindow,L"Track missing from Winamp. Refresh the Planner.",
             L"Set Planner - Find",MB_OK|MB_ICONINFORMATION);
         return;
     }
     HWND pe=reinterpret_cast<HWND>(
         SendMessageW(g_winamp,WM_WA_IPC,1,260 /* IPC_GETWND_PE */));
-    if(!pe || !IsWindow(pe)) {
-        MessageBoxW(spWindow,L"Winamp Playlist Editor is unavailable.",L"Set Planner",MB_OK|MB_ICONINFORMATION);
-        return;
-    }
-    // The classic Playlist Editor may be owned by a Winamp top-level
-    // window. ForegroundWindow() then returns its root rather than 'pe'.
-    // Previously this produced a false failure on Winamp classic skins.
+    if(!pe || !IsWindow(pe)) return;
+    SpStopFind();
+    spFindPe=pe;spFindTarget=match;spFindLast=-2;
+    spFindStalls=0;spFindTicks=0;
     ShowWindow(pe,SW_SHOW);
     HWND root=GetAncestor(pe,GA_ROOT);
     if(!root) root=pe;
@@ -165,39 +197,11 @@ void SpFindInWinamp() {
     BringWindowToTop(pe);
     SetActiveWindow(root);
     SetFocus(pe);
-    // Allow keyboard delivery if the foreground belongs to the same
-    // Winamp window hierarchy. Do not require exact handle identity.
-    HWND front=GetForegroundWindow();
-    if(front!=root && front!=pe &&
-       GetAncestor(front,GA_ROOT)!=root) {
-        MessageBoxW(spWindow,L"Winamp did not come to the foreground. Click the Playlist Editor, then retry Find.",
-                    L"Set Planner - Find",MB_OK|MB_ICONINFORMATION);
-        return;
-    }
-    const bool fromEnd=match>count/2;
-    const WORD first=static_cast<WORD>(fromEnd?VK_END:VK_HOME);
-    const WORD step=static_cast<WORD>(fromEnd?VK_UP:VK_DOWN);
-    const int steps=fromEnd?count-1-match:match;
-    std::vector<INPUT> keys;
-    keys.reserve(static_cast<size_t>(steps+1)*2);
-    auto addKey=[&keys](WORD vk) {
-        INPUT down{};down.type=INPUT_KEYBOARD;down.ki.wVk=vk;
-        keys.push_back(down);
-        INPUT up=down;up.ki.dwFlags=KEYEVENTF_KEYUP;
-        keys.push_back(up);
-    };
-    addKey(first);
-    for(int i=0;i<steps;++i) addKey(step);
-    // Keep batches bounded for old Windows input queues.
-    for(size_t i=0;i<keys.size();i+=64) {
-        const UINT batch=static_cast<UINT>(std::min<size_t>(64,keys.size()-i));
-        if(SendInput(batch,keys.data()+i,sizeof(INPUT))!=batch) {
-            MessageBoxW(spWindow,L"Winamp did not receive all navigation keys.",
-                L"Set Planner - Find",MB_OK|MB_ICONINFORMATION);
-            break;
-        }
-    }
+    // Timer runs on the same Winamp UI thread; each event is dispatched
+    // before the next, unlike the previous long SendInput burst.
+    SetTimer(spWindow,SP_FIND_TIMER,45,nullptr);
 }
+
 void SpMove(int direction) {
     int i=SpSelectedFirst(), j=i+direction;
     if(i<0 || j<0 || j>=(int)spRows.size() || spRows[i].locked || spRows[j].locked) return;
@@ -309,6 +313,9 @@ LRESULT CALLBACK SpWndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
         if(hint&&g_font)SendMessageW(hint,WM_SETFONT,(WPARAM)g_font,TRUE);
         return 0;
     }
+    case WM_TIMER:
+        if(wp==SP_FIND_TIMER) {SpFindTick();return 0;}
+        break;
     case WM_COMMAND:
         switch(LOWORD(wp)) {
         case SP_IMPORT: SpImport();break;
@@ -406,8 +413,8 @@ LRESULT CALLBACK SpWndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
                 ListView_SetItemState(spList,i,LVIS_SELECTED,LVIS_SELECTED);
             return 0;
         } break;
-    case WM_CLOSE:spDragFrom=-1; if(GetCapture()==hwnd)ReleaseCapture();ShowWindow(hwnd,SW_HIDE);return 0;
-    case WM_DESTROY:spList=nullptr;spWindow=nullptr;return 0;
+    case WM_CLOSE:SpStopFind();spDragFrom=-1; if(GetCapture()==hwnd)ReleaseCapture();ShowWindow(hwnd,SW_HIDE);return 0;
+    case WM_DESTROY:SpStopFind();spList=nullptr;spWindow=nullptr;return 0;
     }
     return DefWindowProcW(hwnd,msg,wp,lp);
 }
