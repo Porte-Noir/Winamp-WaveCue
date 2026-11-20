@@ -1,10 +1,10 @@
 // WaveCue Set Planner - private, in-memory planning surface.
 // Included inside gen_wavecue.cpp's anonymous namespace, after cache helpers.
-// Intentionally NEVER writes to Winamp's playlist or to disk.
+// Planning is private until Export to Winamp is explicitly confirmed.
 constexpr int SP_IMPORT=3101, SP_SORT=3102, SP_SORT_SEL=3103, SP_UP=3104,
  SP_DOWN=3105, SP_REMOVE=3106, SP_PLUS2=3107, SP_MINUS2=3108,
  SP_PLUS7=3109, SP_MINUS7=3110, SP_END=3111, SP_UNDO=3112,
- SP_FIND=3113;
+ SP_FIND=3113, SP_EXPORT=3114;
 constexpr int SP_LIST=3190;
 struct PlannerRow {
     int type=0; // 0 = song, 1 = transition, 2 = end of playlist
@@ -76,6 +76,31 @@ int SpHarmonicQuality(int index) {
 }
 // A good harmonic transition with excessive tempo separation is yellow,
 // not green. Red harmonic transitions remain red regardless of BPM.
+// Compare measured tempos first, then half/double interpretations.
+// Prefer the original whenever its gap is inside the soft compatibility
+// window. Otherwise accept a musically equivalent half/double pulse.
+int SpEffectiveTempoGap(int a,int b,int* adjustment=nullptr) {
+    if(adjustment) *adjustment=0;
+    if(a<=0 || b<=0) return 0;
+    const int direct=abs(a-b);
+    if(direct<=20) return direct;
+    struct Match { int gap;int rank; };
+    Match best{direct,0};
+    const int aa[]={a,a/2,a*2};
+    const int bb[]={b,b/2,b*2};
+    // Check destination first: original, half, double; then source.
+    const int order[][2]={{0,1},{0,2},{1,0},{2,0},
+                          {1,1},{1,2},{2,1},{2,2}};
+    for(int k=0;k<8;++k) {
+        const int x=order[k][0],y=order[k][1];
+        if(aa[x]<=0 || bb[y]<=0) continue;
+        const int diff=abs(aa[x]-bb[y]);
+        if(diff<=20 && (best.gap>20 || diff+3*(x+y)<best.gap+3*best.rank))
+            best={diff,x+y};
+    }
+    if(adjustment) *adjustment=best.rank;
+    return best.gap;
+}
 int SpQuality(int index) {
     const int harmonic=SpHarmonicQuality(index);
     if(harmonic!=2 || spRows[index].bpm<=0) return harmonic;
@@ -98,7 +123,7 @@ int SpQuality(int index) {
        SpNumber(spRows[index].key)==SpAdvance(SpNumber(previousKey->key),7))
         return harmonic;
     if(previousTempo &&
-       abs(previousTempo->bpm-spRows[index].bpm)>20)
+       SpEffectiveTempoGap(previousTempo->bpm,spRows[index].bpm)>20)
         return 1;
     return harmonic;
 }
@@ -325,20 +350,18 @@ constexpr int SP_BPM_WARNING_LIMIT=20;
 int SpTempoCost(const PlannerRow* from,const PlannerRow& to,
                 const PlannerRow* harmonicFrom=nullptr) {
     if(!from || from->bpm<=0 || to.bpm<=0) return 0;
-    const int difference=abs(from->bpm-to.bpm);
-    // Harmonic predecessor and tempo predecessor may differ when BPM
-    // metadata is missing. Judge an intentional +7 by the harmonic one.
+    int adjustment=0;
+    const int difference=SpEffectiveTempoGap(from->bpm,to.bpm,&adjustment);
     const PlannerRow* keyFrom=harmonicFrom?harmonicFrom:from;
+    // Keep the existing +7 energy-break exception if even the best
+    // half/double interpretation remains wide.
     if(SpNumber(keyFrom->key)>0 && SpNumber(to.key)>0 &&
        keyFrom->key.back()==to.key.back() &&
        SpNumber(to.key)==SpAdvance(SpNumber(keyFrom->key),7))
-        return difference<=SP_BPM_WARNING_LIMIT?difference/5:5;
-    // Within 15 BPM, tempo is a light tie-breaker. Above 20,
-    // penalize the jump enough for Beam Search to consider another
-    // harmonic route, while still permitting it if choices are limited.
-    if(difference<=SP_BPM_SOFT_LIMIT) return difference/5;
+        return (difference<=SP_BPM_WARNING_LIMIT?difference/5:5)+adjustment*3;
+    if(difference<=SP_BPM_SOFT_LIMIT) return difference/5+adjustment*3;
     if(difference<=SP_BPM_WARNING_LIMIT)
-        return 3+(difference-SP_BPM_SOFT_LIMIT)*2;
+        return 3+(difference-SP_BPM_SOFT_LIMIT)*2+adjustment*3;
     return 13+std::min(160,(difference-SP_BPM_WARNING_LIMIT)*4);
 }
 // Fixed boundaries are never crossed. Unanalysed tracks can be skipped
@@ -586,6 +609,49 @@ LRESULT CALLBACK SpListKeyboard(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp,
     if(msg==WM_NCDESTROY) RemoveWindowSubclass(hwnd,SpListKeyboard,id);
     return DefSubclassProc(hwnd,msg,wp,lp);
 }
+void SpExportToWinamp(HWND hwnd) {
+    if(!g_winamp || !IsWindow(g_winamp) || spRows.empty()) return;
+    std::vector<std::wstring> paths;
+    for(const auto& row:spRows) {
+        if(row.type!=0) continue; // markers never become playlist entries
+        if(row.path.empty()) {
+            MessageBoxW(hwnd,L"Export cancelled: a track has no file path.",
+                        L"WaveCue - Export",MB_OK|MB_ICONWARNING);
+            return;
+        }
+        // Stream URLs are also valid playlist entries.
+        const bool url=row.path.find(L"://")!=std::wstring::npos;
+        if(!url && GetFileAttributesW(row.path.c_str())==INVALID_FILE_ATTRIBUTES) {
+            std::wstring error=L"Export cancelled: missing file:\n"+row.path;
+            MessageBoxW(hwnd,error.c_str(),L"WaveCue - Export",
+                        MB_OK|MB_ICONWARNING);
+            return;
+        }
+        paths.push_back(row.path);
+    }
+    if(paths.empty()) return;
+    std::wstring prompt=L"Replace the current Winamp playlist with all "+
+        std::to_wstring(paths.size())+
+        L" Planner tracks (including the reserve)?\n\n"
+        L"The current playlist will be cleared. This cannot be undone.";
+    if(MessageBoxW(hwnd,prompt.c_str(),L"Export to Winamp",
+                   MB_YESNO|MB_ICONWARNING|MB_DEFBUTTON2)!=IDYES) return;
+    // These are Winamp's native playlist operations, not synthesized input.
+    SendMessageW(g_winamp,WM_WA_IPC,0,101 /* IPC_DELETE */);
+    struct EnqueueFileW { const wchar_t* filename;const wchar_t* title;int length; };
+    for(const auto& path:paths) {
+        EnqueueFileW entry{path.c_str(),nullptr,-1};
+        SendMessageW(g_winamp,WM_WA_IPC,(WPARAM)&entry,
+                     1100 /* IPC_ENQUEUEFILEW */);
+    }
+    const int count=(int)SendMessageW(g_winamp,WM_WA_IPC,0,IPC_GETLISTLENGTH);
+    if(count!=(int)paths.size()) {
+        MessageBoxW(hwnd,L"Export completed with a different number of "
+                        L"tracks than expected. Please inspect the Playlist Editor.",
+                    L"WaveCue - Export",MB_OK|MB_ICONWARNING);
+    }
+    SpUpdateTrackNumber();
+}
 void SpAddButton(HWND hwnd,int id,const wchar_t* title,int x,int y,int w) {
     HWND b=CreateWindowExW(0,L"BUTTON",title,WS_CHILD|WS_VISIBLE|WS_TABSTOP,
         x,y,w,27,hwnd,reinterpret_cast<HMENU>((INT_PTR)id),g_plugin.hDllInstance,nullptr);
@@ -611,6 +677,7 @@ LRESULT CALLBACK SpWndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
         SpAddButton(hwnd,SP_SORT_SEL,L"Sort Selection",145,10,122);
         SpAddButton(hwnd,SP_SORT,L"Sort All",276,10,86);
         SpAddButton(hwnd,SP_UNDO,L"Undo",371,10,70);
+        SpAddButton(hwnd,SP_EXPORT,L"Export to Winamp",764,10,168);
         HWND numberLabel=CreateWindowExW(0,L"STATIC",L"WINAMP #",
             WS_CHILD|WS_VISIBLE|SS_LEFT,465,15,95,21,hwnd,nullptr,
             g_plugin.hDllInstance,nullptr);
@@ -641,6 +708,7 @@ LRESULT CALLBACK SpWndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
     case WM_COMMAND:
         switch(LOWORD(wp)) {
         case SP_IMPORT: SpImport();break;
+        case SP_EXPORT: SpExportToWinamp(hwnd);break;
         case SP_SORT: SpSort(false);break;
         case SP_SORT_SEL: SpSort(true);break;
         case SP_UP: SpMove(-1);break;
@@ -705,7 +773,7 @@ LRESULT CALLBACK SpWndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
                     if(i>=0&&i<(int)spRows.size()) {
                         int q=SpQuality(i);
                         draw->clrTextBk=spRows[i].type==2?RGB(45,38,34):
-                          spRows[i].type==1?RGB(44,46,29):RGB(24,30,31);
+                          spRows[i].type==1?RGB(44,46,29):RGB(0,0,0);
                         draw->clrText=spRows[i].locked?RGB(186,216,149):
                             q==2?RGB(133,224,120):q==1?RGB(240,209,99):
                             q==0?RGB(237,120,108):RGB(199,213,200);
