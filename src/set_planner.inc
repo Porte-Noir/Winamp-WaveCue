@@ -127,10 +127,13 @@ void SpImport() {
 // Winamp's PE window supports Home/End and arrow navigation just like its UI.
 constexpr UINT_PTR SP_FIND_TIMER=3191;
 int spFindTarget=-1,spFindLast=-2,spFindStalls=0,spFindTicks=0;
+int spFindCount=0,spFindMoves=0;
+bool spFindAtBeginning=false;
 HWND spFindPe=nullptr;
 void SpStopFind() {
     if(spWindow && IsWindow(spWindow)) KillTimer(spWindow,SP_FIND_TIMER);
     spFindTarget=-1;spFindPe=nullptr;spFindLast=-2;
+    spFindCount=0;spFindMoves=0;spFindAtBeginning=false;
 }
 void SpSendKey(WORD vk) {
     INPUT pair[2]{};
@@ -142,28 +145,42 @@ void SpSendKey(WORD vk) {
 }
 void SpFindTick() {
     if(spFindTarget<0 || !spFindPe || !IsWindow(spFindPe) ||
-       !g_winamp || !IsWindow(g_winamp)) { SpStopFind();return; }
-    // Avoid drifting through the list if Winamp is not reacting to a key.
-    if(++spFindTicks>2400) {SpStopFind();return;}
+       !g_winamp || !IsWindow(g_winamp)) {SpStopFind();return;}
+    // Bound navigation to the actual size of the playlist, not 40 or 70.
+    // The additional ticks allow the old Winamp UI to process key events.
+    if(++spFindTicks>std::max(80,spFindCount*12+80)) {
+        SpStopFind();return;
+    }
     const int current=(int)SendMessageW(g_winamp,WM_WA_IPC,
-                          (WPARAM)-1,IPC_PLAYLIST_GET_NEXT_SELECTED);
-    if(current==spFindTarget) {SpStopFind();return;}
-    if(current==spFindLast) {
-        if(++spFindStalls>=8) {
-            SpStopFind();
-            MessageBoxW(spWindow,L"Playlist Editor selection did not move. Find stopped safely.",
-                        L"Set Planner - Find",MB_OK|MB_ICONINFORMATION);
+                           (WPARAM)-1,IPC_PLAYLIST_GET_NEXT_SELECTED);
+    if(current==spFindTarget && spFindAtBeginning) {SpStopFind();return;}
+    if(!spFindAtBeginning) {
+        // Always reset the selection to the top on each new Find.
+        if(current==0 && spFindMoves>0) {
+            spFindAtBeginning=true;spFindLast=0;spFindStalls=0;
+        } else {
+            if(++spFindStalls>=5) {
+                SpSendKey(VK_HOME);
+                spFindStalls=0;
+                ++spFindMoves;
+            }
             return;
         }
-    } else spFindStalls=0;
-    spFindLast=current;
-    const int delta=spFindTarget-current;
-    // One keypress per UI cycle, allowing the classic Winamp event loop
-    // to consume each event. Never flood the input queue.
-    WORD key=current<0 ? VK_HOME :
-        delta>30 ? VK_NEXT : delta< -30 ? VK_PRIOR :
-        delta>0 ? VK_DOWN : VK_UP;
-    SpSendKey(key);
+    }
+    // Search forward from item zero, a single Down event at a time.
+    // Do not send PgDown: Winamp's classic playlist can skip entries.
+    if(current>spFindTarget || current>=spFindCount) {
+        SpStopFind();return;
+    }
+    if(current==spFindLast) {
+        if(++spFindStalls<4) return; // wait for the previous key to register
+    } else {
+        spFindLast=current;spFindStalls=0;
+    }
+    if(spFindMoves>spFindCount+30) {SpStopFind();return;}
+    SpSendKey(VK_DOWN);
+    ++spFindMoves;
+    spFindStalls=0;
 }
 void SpFindInWinamp() {
     const int selected=SpSelectedFirst();
@@ -187,8 +204,8 @@ void SpFindInWinamp() {
         SendMessageW(g_winamp,WM_WA_IPC,1,260 /* IPC_GETWND_PE */));
     if(!pe || !IsWindow(pe)) return;
     SpStopFind();
-    spFindPe=pe;spFindTarget=match;spFindLast=-2;
-    spFindStalls=0;spFindTicks=0;
+    spFindPe=pe;spFindTarget=match;spFindCount=count;spFindLast=-2;
+    spFindStalls=0;spFindTicks=0;spFindMoves=0;spFindAtBeginning=false;
     ShowWindow(pe,SW_SHOW);
     HWND root=GetAncestor(pe,GA_ROOT);
     if(!root) root=pe;
