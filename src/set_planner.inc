@@ -402,9 +402,16 @@ void SpSort(bool selectionOnly) {
             run.reserve(last-cursor);
             for(int j=cursor;j<last;++j) run.push_back(spRows[slots[j]]);
             const PlannerRow* before=SpNeighbourKey(firstSlot-1,-1);
-            const PlannerRow* after=SpNeighbourKey(lastSlot+1,1);
-            // Exit anchors are used only when no manual break or reserve
-            // divides the run from that track.
+            // Exit is optional. An immediately following unknown/silent
+            // track or the end of the playlist is NOT a target to chase.
+            // Unlike the entry lookup, do not skip over unknown tracks to
+            // impose a distant harmonic endpoint.
+            const PlannerRow* after=nullptr;
+            if(lastSlot+1<(int)spRows.size()) {
+                const PlannerRow& next=spRows[lastSlot+1];
+                if(next.type==0 && SpNumber(next.key)>0)
+                    after=&next;
+            }
             const auto optimized=SpBeamOrder(run,before,after);
             for(int j=cursor;j<last;++j)
                 spRows[slots[j]]=optimized[j-cursor];
