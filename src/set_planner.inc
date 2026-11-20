@@ -79,15 +79,27 @@ int SpHarmonicQuality(int index) {
 int SpQuality(int index) {
     const int harmonic=SpHarmonicQuality(index);
     if(harmonic!=2 || spRows[index].bpm<=0) return harmonic;
+    // Follow the latest known BPM across intervening tracks without tempo
+    // metadata; break and reserve markers remain section boundaries.
+    const PlannerRow* previousKey=nullptr;
+    const PlannerRow* previousTempo=nullptr;
     for(int p=index-1;p>=0;--p) {
         const PlannerRow& prior=spRows[p];
-        if(prior.type==2) break;
-        if(prior.type==0 && SpNumber(prior.key)>0) {
-            if(prior.bpm>0 &&
-               abs(prior.bpm-spRows[index].bpm)>20) return 1;
-            break;
-        }
+        if(prior.type==2 || prior.type==1) break;
+        if(prior.type!=0) continue;
+        if(!previousKey && SpNumber(prior.key)>0) previousKey=&prior;
+        if(!previousTempo && prior.bpm>0) previousTempo=&prior;
+        if(previousKey && previousTempo) break;
     }
+    // +7 is an intentional change of energy, so a wide BPM jump
+    // should not automatically downgrade a valid harmonic transition.
+    if(previousKey && !previousKey->key.empty() &&
+       previousKey->key.back()==spRows[index].key.back() &&
+       SpNumber(spRows[index].key)==SpAdvance(SpNumber(previousKey->key),7))
+        return harmonic;
+    if(previousTempo &&
+       abs(previousTempo->bpm-spRows[index].bpm)>SP_BPM_WARNING_LIMIT)
+        return 1;
     return harmonic;
 }
 void SpUpdateTrackNumber();
@@ -295,6 +307,12 @@ constexpr int SP_BPM_WARNING_LIMIT=20;
 int SpTempoCost(const PlannerRow* from,const PlannerRow& to) {
     if(!from || from->bpm<=0 || to.bpm<=0) return 0;
     const int difference=abs(from->bpm-to.bpm);
+    // +7 is an intentional energy shift. Keep a small BPM preference
+    // without penalizing the creative transition as a tempo failure.
+    if(SpNumber(from->key)>0 && SpNumber(to.key)>0 &&
+       from->key.back()==to.key.back() &&
+       SpNumber(to.key)==SpAdvance(SpNumber(from->key),7))
+        return difference<=SP_BPM_WARNING_LIMIT?difference/5:5;
     // Within 15 BPM, tempo is a light tie-breaker. Above 20,
     // penalize the jump enough for Beam Search to consider another
     // harmonic route, while still permitting it if choices are limited.
@@ -313,6 +331,14 @@ const PlannerRow* SpNeighbourKey(int from,int step) {
     }
     return nullptr;
 }
+const PlannerRow* SpNeighbourBpm(int from,int step) {
+    for(int i=from;i>=0 && i<(int)spRows.size();i+=step) {
+        const auto& row=spRows[i];
+        if(row.type==2 || row.type==1) return nullptr;
+        if(row.type==0 && row.bpm>0) return &row;
+    }
+    return nullptr;
+}
 struct SpBeamNode {
     std::vector<int> path;
     std::vector<unsigned char> used;
@@ -322,7 +348,8 @@ struct SpBeamNode {
 };
 std::vector<PlannerRow> SpBeamOrder(const std::vector<PlannerRow>& pool,
                                     const PlannerRow* before,
-                                    const PlannerRow* after) {
+                                    const PlannerRow* after,
+                                    const PlannerRow* beforeTempo) {
     const int n=(int)pool.size();
     if(n<=1) return pool;
     constexpr size_t width=96;
@@ -333,6 +360,14 @@ std::vector<PlannerRow> SpBeamOrder(const std::vector<PlannerRow>& pool,
         next.reserve(beam.size()*n);
         for(const auto& node:beam) {
             const PlannerRow* previous=node.last>=0?&pool[node.last]:before;
+            // Harmonic and tempo references can come from different tracks.
+            // A song with known key but no BPM must not hide the last
+            // measured tempo (e.g. 78 -> unknown -> 123).
+            const PlannerRow* tempoPrevious=beforeTempo;
+            for(int k=(int)node.path.size()-1;k>=0;--k) {
+                const PlannerRow& past=pool[node.path[k]];
+                if(past.bpm>0) {tempoPrevious=&past;break;}
+            }
             bool hasKnown=false;
             for(int j=0;j<n;++j)
                 if(!node.used[j] && SpNumber(pool[j].key)>0) {
@@ -347,7 +382,7 @@ std::vector<PlannerRow> SpBeamOrder(const std::vector<PlannerRow>& pool,
                 candidate.path.push_back(j);
                 candidate.last=j;
                 const int cost=SpTransitionCost(previous,pool[j])+
-                               SpTempoCost(previous,pool[j]);
+                               SpTempoCost(tempoPrevious,pool[j]);
                 candidate.score+=cost;
                 // Stable order for equally good sequences.
                 candidate.orderScore+=abs(j-depth);
@@ -437,7 +472,8 @@ void SpSort(bool selectionOnly) {
                 if(next.type==0 && SpNumber(next.key)>0)
                     after=&next;
             }
-            const auto optimized=SpBeamOrder(run,before,after);
+            const PlannerRow* beforeTempo=SpNeighbourBpm(firstSlot-1,-1);
+            const auto optimized=SpBeamOrder(run,before,after,beforeTempo);
             for(int j=cursor;j<last;++j)
                 spRows[slots[j]]=optimized[j-cursor];
             cursor=last;
