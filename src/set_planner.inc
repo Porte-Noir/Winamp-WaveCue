@@ -292,9 +292,18 @@ std::vector<PlannerRow> SpBeamOrder(const std::vector<PlannerRow>& pool,
                 // Stable order for equally good sequences.
                 candidate.orderScore+=abs(j-depth);
                 // On the final track, evaluate the fixed exit track as well.
-                if(depth==n-1 && after && SpNumber(pool[j].key)>0) {
-                    candidate.score+=SpTransitionCost(&pool[j],*after)*2+
-                                     SpTempoCost(&pool[j],*after);
+                if(depth==n-1 && after) {
+                    // Ignore silent/unanalysed trailers for the endpoint,
+                    // just as the Planner's transition indicators do.
+                    const PlannerRow* exitFrom=nullptr;
+                    for(int k=(int)candidate.path.size()-1;k>=0;--k) {
+                        const PlannerRow& tail=pool[candidate.path[k]];
+                        if(SpNumber(tail.key)>0) {exitFrom=&tail;break;}
+                    }
+                    if(exitFrom) {
+                        candidate.score+=SpTransitionCost(exitFrom,*after)*2+
+                                         SpTempoCost(exitFrom,*after);
+                    }
                 }
                 next.push_back(std::move(candidate));
             }
