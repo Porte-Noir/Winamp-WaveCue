@@ -98,7 +98,7 @@ int SpQuality(int index) {
        SpNumber(spRows[index].key)==SpAdvance(SpNumber(previousKey->key),7))
         return harmonic;
     if(previousTempo &&
-       abs(previousTempo->bpm-spRows[index].bpm)>SP_BPM_WARNING_LIMIT)
+       abs(previousTempo->bpm-spRows[index].bpm)>20)
         return 1;
     return harmonic;
 }
