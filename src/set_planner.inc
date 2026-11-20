@@ -2,7 +2,7 @@
 // Included inside gen_wavecue.cpp's anonymous namespace, after cache helpers.
 // Intentionally NEVER writes to Winamp's playlist or to disk.
 constexpr int SP_IMPORT=3101, SP_SORT=3102, SP_SORT_SEL=3103, SP_UP=3104,
- SP_DOWN=3105, SP_LOCK=3106, SP_PLUS2=3107, SP_MINUS2=3108,
+ SP_DOWN=3105, SP_REMOVE=3106, SP_PLUS2=3107, SP_MINUS2=3108,
  SP_PLUS7=3109, SP_MINUS7=3110, SP_END=3111, SP_UNDO=3112,
  SP_FIND=3113;
 constexpr int SP_LIST=3190;
@@ -114,6 +114,9 @@ void SpRender(int focus=-1,bool followMove=false) {
                              LVIS_SELECTED|LVIS_FOCUSED);
     // Restore the viewport after setting selection. Selecting items can
     // itself scroll the control, especially near the bottom of the window.
+    // Re-enable painting before scrolling: LVM_SCROLL while redraw is
+    // disabled can leave stale row fragments in classic Windows ListViews.
+    SendMessageW(spList,WM_SETREDRAW,TRUE,0);
     const int currentTop=ListView_GetTopIndex(spList);
     if(previousTop!=currentTop)
         ListView_Scroll(spList,0,(previousTop-currentTop)*rowHeight);
@@ -125,8 +128,10 @@ void SpRender(int focus=-1,bool followMove=false) {
         if(focus<first || focus>=first+visible)
             ListView_EnsureVisible(spList,focus,FALSE);
     }
-    SendMessageW(spList,WM_SETREDRAW,TRUE,0);
-    InvalidateRect(spList,nullptr,TRUE);
+    // Force a complete repaint after the reorder rather than relying on
+    // Win32's partial scroll optimizations, which left visual artifacts.
+    RedrawWindow(spList,nullptr,nullptr,
+        RDW_INVALIDATE|RDW_ERASE|RDW_FRAME|RDW_ALLCHILDREN|RDW_UPDATENOW);
     SpUpdateTrackNumber();
 }
 void SpImport() {
@@ -193,6 +198,20 @@ void SpMove(int direction) {
     int i=SpSelectedFirst(), j=i+direction;
     if(i<0 || j<0 || j>=(int)spRows.size() || spRows[i].locked || spRows[j].locked) return;
     SpSnapshot(); std::swap(spRows[i],spRows[j]); SpRender(j,true);
+}
+void SpRemoveSelected() {
+    if(!spList || spRows.empty()) return;
+    std::vector<int> selected;
+    for(int i=-1;(i=ListView_GetNextItem(spList,i,LVNI_SELECTED))!=-1;)
+        if(i>=0 && i<(int)spRows.size()) selected.push_back(i);
+    if(selected.empty()) return;
+    const int focus=selected.front();
+    SpSnapshot();
+    // Remove in reverse so the indices remain valid. A lock protects
+    // sorting and dragging; an explicit Remove is allowed.
+    for(auto it=selected.rbegin();it!=selected.rend();++it)
+        spRows.erase(spRows.begin()+*it);
+    SpRender(spRows.empty()?-1:std::min(focus,(int)spRows.size()-1));
 }
 void SpInsert(int type,int jump=0) {
     int selected=SpSelectedFirst();
@@ -360,8 +379,8 @@ LRESULT CALLBACK SpWndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
         }
         if(g_font) SendMessageW(spList,WM_SETFONT,(WPARAM)g_font,TRUE);
         SpAddButton(hwnd,SP_IMPORT,L"Import / Refresh",12,10,124);
-        SpAddButton(hwnd,SP_SORT,L"Sort All",145,10,86);
-        SpAddButton(hwnd,SP_SORT_SEL,L"Sort Selection",240,10,122);
+        SpAddButton(hwnd,SP_SORT_SEL,L"Sort Selection",145,10,122);
+        SpAddButton(hwnd,SP_SORT,L"Sort All",276,10,86);
         SpAddButton(hwnd,SP_UNDO,L"Undo",371,10,70);
         HWND numberLabel=CreateWindowExW(0,L"STATIC",L"WINAMP #",
             WS_CHILD|WS_VISIBLE|SS_LEFT,465,15,95,21,hwnd,nullptr,
@@ -375,14 +394,14 @@ LRESULT CALLBACK SpWndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
         SetTimer(hwnd,SP_NUMBER_TIMER,500,nullptr);
         SpAddButton(hwnd,SP_UP,L"Up",12,545,60);
         SpAddButton(hwnd,SP_DOWN,L"Down",78,545,60);
-        SpAddButton(hwnd,SP_LOCK,L"Toggle Lock",146,545,106);
+        SpAddButton(hwnd,SP_REMOVE,L"Remove",146,545,106);
         SpAddButton(hwnd,SP_PLUS2,L"+2",263,545,58);
         SpAddButton(hwnd,SP_MINUS2,L"-2",326,545,58);
         SpAddButton(hwnd,SP_PLUS7,L"+7",389,545,58);
         SpAddButton(hwnd,SP_MINUS7,L"-7",452,545,58);
         SpAddButton(hwnd,SP_END,L"End of Playlist",520,545,137);
         HWND hint=CreateWindowExW(0,L"STATIC",
-          L"Select any track to see its current Winamp number. Sort All moves unanalysed free tracks to reserve.",
+          L"Select a track for its Winamp number. Double-click or click Lock to lock. Remove only edits the Planner.",
           WS_CHILD|WS_VISIBLE,12,584,905,23,hwnd,nullptr,g_plugin.hDllInstance,nullptr);
         if(hint&&g_font)SendMessageW(hint,WM_SETFONT,(WPARAM)g_font,TRUE);
         return 0;
@@ -397,12 +416,7 @@ LRESULT CALLBACK SpWndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
         case SP_SORT_SEL: SpSort(true);break;
         case SP_UP: SpMove(-1);break;
         case SP_DOWN: SpMove(1);break;
-        case SP_LOCK: {
-            bool any=false;
-            for(int i=-1;(i=ListView_GetNextItem(spList,i,LVNI_SELECTED))!=-1;)
-                if(i<(int)spRows.size()) {if(!any)SpSnapshot();any=true;spRows[i].locked=!spRows[i].locked;}
-            if(any)SpRender();break;
-        }
+        case SP_REMOVE: SpRemoveSelected();break;
         case SP_PLUS2:SpInsert(1,2);break;
         case SP_MINUS2:SpInsert(1,-2);break;
         case SP_PLUS7:SpInsert(1,7);break;
