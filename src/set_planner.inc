@@ -48,9 +48,17 @@ int SpQuality(int index) {
     const int previous=SpNumber(spRows[p].key);
     const int goal=SpAdvance(previous,jump);
     const bool sameLetter=spRows[p].key.back()==spRows[index].key.back();
-    if(cur==goal && (sameLetter || jump==0)) return 2;
-    if(jump==0 && sameLetter &&
-       (cur==SpAdvance(previous,1) || cur==SpAdvance(previous,-1))) return 2;
+    // Explicit placeholders and automatic +2/+7/-2 transitions are valid.
+    // Keep the letter (A/B) distinction, unless the explicit marker guides
+    // the change, in which case its numeric target is the intention.
+    if(jump!=0 && cur==goal) return 2;
+    if(jump==0 && sameLetter) {
+        if(cur==previous || cur==SpAdvance(previous,1) ||
+           cur==SpAdvance(previous,-1) || cur==SpAdvance(previous,2) ||
+           cur==SpAdvance(previous,7) || cur==SpAdvance(previous,-2))
+            return 2;
+    }
+    if(jump==0 && cur==previous) return 1; // relative major/minor
     const int distance=std::min((cur-goal+12)%12,(goal-cur+12)%12);
     return distance<=1 ? 1 : 0;
 }
@@ -195,21 +203,61 @@ void SpSort(bool selectionOnly) {
         for(int i=start;i<finish;++i) if(selection[i]) {
             slots.push_back(i);pool.push_back(spRows[i]);
         }
-        std::stable_sort(pool.begin(),pool.end(),[reference](const PlannerRow& a,
-                                                              const PlannerRow& b) {
-            const int ka=SpNumber(a.key),kb=SpNumber(b.key);
-            if(ka<0 || kb<0) return ka>=0 && kb<0;
-            // Each uninterrupted section starts with its inherited Camelot
-            // reference. This is purely numeric; BPM never outranks key.
-            const int da=(ka-reference+12)%12, db=(kb-reference+12)%12;
-            if(da!=db) return da<db;
-            // Major/minor are distinct even if their Camelot number matches.
-            if(a.key!=b.key) return a.key<b.key;
-            if(a.bpm<0 || b.bpm<0) return a.bpm>=0 && b.bpm<0;
-            return a.bpm<b.bpm;
-        });
+        // Greedy Camelot ordering: stay on the same key or advance +1
+        // first; if unavailable, try +2, +7, -2, then numeric ascending.
+        // Each choice is removed from the pool before the next decision.
+        // Only equal-priority candidates are compared by BPM proximity.
+        int lastKey=reference;
+        wchar_t lastLetter=0;
+        int lastBpm=-1;
+        std::vector<PlannerRow> ordered;
+        ordered.reserve(pool.size());
+        while(!pool.empty()) {
+            size_t best=0;
+            int bestPriority=std::numeric_limits<int>::max();
+            int bestDistance=std::numeric_limits<int>::max();
+            int bestTempo=std::numeric_limits<int>::max();
+            for(size_t j=0;j<pool.size();++j) {
+                const PlannerRow& item=pool[j];
+                const int key=SpNumber(item.key);
+                const wchar_t letter=item.key.empty()?0:item.key.back();
+                const bool sameLetter=lastLetter==0 || letter==lastLetter;
+                int priority=6, distance=99;
+                if(key>=1) {
+                    // Prefer same Camelot, then the regular rising wheel.
+                    if(sameLetter && key==lastKey) {priority=0;distance=0;}
+                    else if(sameLetter && key==SpAdvance(lastKey,1)) {priority=1;distance=0;}
+                    else if(sameLetter && key==SpAdvance(lastKey,2)) {priority=2;distance=0;}
+                    else if(sameLetter && key==SpAdvance(lastKey,7)) {priority=3;distance=0;}
+                    else if(sameLetter && key==SpAdvance(lastKey,-2)) {priority=4;distance=0;}
+                    else {
+                        priority=5;
+                        distance=(key-lastKey+12)%12;
+                        // If no preferred transition exists, continue in
+                        // ascending wheel order, regardless of A/B.
+                    }
+                }
+                const int tempo=(lastBpm>0 && item.bpm>0)
+                    ? abs(item.bpm-lastBpm) : (item.bpm>0?0:10000);
+                if(priority<bestPriority ||
+                   (priority==bestPriority && distance<bestDistance) ||
+                   (priority==bestPriority && distance==bestDistance && tempo<bestTempo)) {
+                    best=j;bestPriority=priority;bestDistance=distance;
+                    bestTempo=tempo;
+                }
+            }
+            PlannerRow chosen=std::move(pool[best]);
+            pool.erase(pool.begin()+best);
+            const int key=SpNumber(chosen.key);
+            if(key>0) {
+                lastKey=key;
+                lastLetter=chosen.key.back();
+            }
+            if(chosen.bpm>0) lastBpm=chosen.bpm;
+            ordered.push_back(std::move(chosen));
+        }
         for(size_t j=0;j<slots.size();++j)
-            spRows[slots[j]]=std::move(pool[j]);
+            spRows[slots[j]]=std::move(ordered[j]);
         for(int i=start;i<finish;++i)
             if(SpNumber(spRows[i].key)>0)
                 reference=SpNumber(spRows[i].key);
