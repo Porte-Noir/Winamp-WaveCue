@@ -224,6 +224,96 @@ void SpInsert(int type,int jump=0) {
     spRows.insert(spRows.begin()+selected+1,std::move(row));
     SpRender(selected+1);
 }
+// Beam-search harmonic optimizer. This is entirely in-memory; it never
+// modifies Winamp's playlist or audio playback.
+int SpTransitionCost(const PlannerRow* from,const PlannerRow& to) {
+    if(!from || SpNumber(from->key)<0 || SpNumber(to.key)<0) return 0;
+    const int prior=SpNumber(from->key), next=SpNumber(to.key);
+    const bool sameLetter=from->key.back()==to.key.back();
+    // User-defined priority: =, +1, +2, +7, -2, then imperfect transitions.
+    if(sameLetter && next==prior) return 0;
+    if(sameLetter && next==SpAdvance(prior,1)) return 12;
+    if(sameLetter && next==SpAdvance(prior,2)) return 26;
+    if(sameLetter && next==SpAdvance(prior,7)) return 40;
+    if(sameLetter && next==SpAdvance(prior,-2)) return 54;
+    if(next==prior) return 70; // parallel A/B: preferable to an unrelated key
+    return 145;
+}
+int SpTempoCost(const PlannerRow* from,const PlannerRow& to) {
+    if(!from || from->bpm<=0 || to.bpm<=0) return 0;
+    return std::min(30,abs(from->bpm-to.bpm))/6;
+}
+// Fixed boundaries are never crossed. Unanalysed tracks can be skipped
+// when determining the harmonic reference, as in SpQuality.
+const PlannerRow* SpNeighbourKey(int from,int step) {
+    for(int i=from;i>=0 && i<(int)spRows.size();i+=step) {
+        const auto& row=spRows[i];
+        if(row.type==2 || row.type==1) return nullptr;
+        if(row.type==0 && SpNumber(row.key)>0) return &row;
+    }
+    return nullptr;
+}
+struct SpBeamNode {
+    std::vector<int> path;
+    std::vector<unsigned char> used;
+    int score=0;
+    int orderScore=0;
+    int last=-1;
+};
+std::vector<PlannerRow> SpBeamOrder(const std::vector<PlannerRow>& pool,
+                                    const PlannerRow* before,
+                                    const PlannerRow* after) {
+    const int n=(int)pool.size();
+    if(n<=1) return pool;
+    constexpr size_t width=96;
+    std::vector<SpBeamNode> beam(1);
+    beam[0].used.assign(n,0);
+    for(int depth=0;depth<n;++depth) {
+        std::vector<SpBeamNode> next;
+        next.reserve(beam.size()*n);
+        for(const auto& node:beam) {
+            const PlannerRow* previous=node.last>=0?&pool[node.last]:before;
+            bool hasKnown=false;
+            for(int j=0;j<n;++j)
+                if(!node.used[j] && SpNumber(pool[j].key)>0) {
+                    hasKnown=true;break;
+                }
+            for(int j=0;j<n;++j) {
+                if(node.used[j]) continue;
+                // Keep unknown/silent songs at the end of the movable run.
+                if(hasKnown && SpNumber(pool[j].key)<0) continue;
+                SpBeamNode candidate=node;
+                candidate.used[j]=1;
+                candidate.path.push_back(j);
+                candidate.last=j;
+                const int cost=SpTransitionCost(previous,pool[j])+
+                               SpTempoCost(previous,pool[j]);
+                candidate.score+=cost;
+                // Stable order for equally good sequences.
+                candidate.orderScore+=abs(j-depth);
+                // On the final track, evaluate the fixed exit track as well.
+                if(depth==n-1 && after && SpNumber(pool[j].key)>0) {
+                    candidate.score+=SpTransitionCost(&pool[j],*after)*2+
+                                     SpTempoCost(&pool[j],*after);
+                }
+                next.push_back(std::move(candidate));
+            }
+        }
+        // Prefer total musical cost, with original position as a final tie.
+        std::stable_sort(next.begin(),next.end(),[](const SpBeamNode& a,
+                                                     const SpBeamNode& b) {
+            if(a.score!=b.score) return a.score<b.score;
+            return a.orderScore<b.orderScore;
+        });
+        if(next.size()>width) next.resize(width);
+        beam=std::move(next);
+        if(beam.empty()) return pool;
+    }
+    std::vector<PlannerRow> result;
+    result.reserve(n);
+    for(int id:beam.front().path) result.push_back(pool[id]);
+    return result;
+}
 void SpSort(bool selectionOnly) {
     if(spRows.empty()) return;
     std::vector<bool> selection(spRows.size(),!selectionOnly);
@@ -255,77 +345,27 @@ void SpSort(bool selectionOnly) {
         for(int i=start;i<finish;++i) if(selection[i]) {
             slots.push_back(i);pool.push_back(spRows[i]);
         }
-        // Greedy Camelot ordering: stay on the same key or advance +1
-        // first; if unavailable, try +2, +7, -2, then numeric ascending.
-        // Each choice is removed from the pool before the next decision.
-        // Only equal-priority candidates are compared by BPM proximity.
-        int lastKey=reference;
-        wchar_t lastLetter=0;
-        int lastBpm=-1;
-        // Sort Selection starts from the preceding analysed song, rather
-        // than resetting at Camelot 1 or the start of a movable section.
-        // Unknown / silent tracks are transparent for harmonic reference.
-        // A break or reserve marker terminates the lookup boundary.
-        if(!slots.empty()) {
-            for(int prior=slots.front()-1;prior>=0;--prior) {
-                const PlannerRow& previous=spRows[prior];
-                if(previous.type==1 || previous.type==2) break;
-                if(previous.type==0 && SpNumber(previous.key)>0) {
-                    lastKey=SpNumber(previous.key);
-                    lastLetter=previous.key.back();
-                    lastBpm=previous.bpm;
-                    break;
-                }
-            }
+        // Each contiguous selection is optimized separately. Unselected
+        // tracks within the same unlocked section stay fixed and become
+        // possible entry/exit anchors for adjacent selected runs.
+        int cursor=0;
+        while(cursor<(int)slots.size()) {
+            int last=cursor+1;
+            while(last<(int)slots.size() && slots[last]==slots[last-1]+1)
+                ++last;
+            const int firstSlot=slots[cursor], lastSlot=slots[last-1];
+            std::vector<PlannerRow> run;
+            run.reserve(last-cursor);
+            for(int j=cursor;j<last;++j) run.push_back(spRows[slots[j]]);
+            const PlannerRow* before=SpNeighbourKey(firstSlot-1,-1);
+            const PlannerRow* after=SpNeighbourKey(lastSlot+1,1);
+            // Exit anchors are used only when no manual break or reserve
+            // divides the run from that track.
+            const auto optimized=SpBeamOrder(run,before,after);
+            for(int j=cursor;j<last;++j)
+                spRows[slots[j]]=optimized[j-cursor];
+            cursor=last;
         }
-        std::vector<PlannerRow> ordered;
-        ordered.reserve(pool.size());
-        while(!pool.empty()) {
-            size_t best=0;
-            int bestPriority=std::numeric_limits<int>::max();
-            int bestDistance=std::numeric_limits<int>::max();
-            int bestTempo=std::numeric_limits<int>::max();
-            for(size_t j=0;j<pool.size();++j) {
-                const PlannerRow& item=pool[j];
-                const int key=SpNumber(item.key);
-                const wchar_t letter=item.key.empty()?0:item.key.back();
-                const bool sameLetter=lastLetter==0 || letter==lastLetter;
-                int priority=6, distance=99;
-                if(key>=1) {
-                    // Prefer same Camelot, then the regular rising wheel.
-                    if(sameLetter && key==lastKey) {priority=0;distance=0;}
-                    else if(sameLetter && key==SpAdvance(lastKey,1)) {priority=1;distance=0;}
-                    else if(sameLetter && key==SpAdvance(lastKey,2)) {priority=2;distance=0;}
-                    else if(sameLetter && key==SpAdvance(lastKey,7)) {priority=3;distance=0;}
-                    else if(sameLetter && key==SpAdvance(lastKey,-2)) {priority=4;distance=0;}
-                    else {
-                        priority=5;
-                        distance=(key-lastKey+12)%12;
-                        // If no preferred transition exists, continue in
-                        // ascending wheel order, regardless of A/B.
-                    }
-                }
-                const int tempo=(lastBpm>0 && item.bpm>0)
-                    ? abs(item.bpm-lastBpm) : (item.bpm>0?0:10000);
-                if(priority<bestPriority ||
-                   (priority==bestPriority && distance<bestDistance) ||
-                   (priority==bestPriority && distance==bestDistance && tempo<bestTempo)) {
-                    best=j;bestPriority=priority;bestDistance=distance;
-                    bestTempo=tempo;
-                }
-            }
-            PlannerRow chosen=std::move(pool[best]);
-            pool.erase(pool.begin()+best);
-            const int key=SpNumber(chosen.key);
-            if(key>0) {
-                lastKey=key;
-                lastLetter=chosen.key.back();
-            }
-            if(chosen.bpm>0) lastBpm=chosen.bpm;
-            ordered.push_back(std::move(chosen));
-        }
-        for(size_t j=0;j<slots.size();++j)
-            spRows[slots[j]]=std::move(ordered[j]);
         for(int i=start;i<finish;++i)
             if(SpNumber(spRows[i].key)>0)
                 reference=SpNumber(spRows[i].key);
