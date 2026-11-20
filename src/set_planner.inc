@@ -70,7 +70,7 @@ int SpHarmonicQuality(int index) {
            cur==SpAdvance(previous,7) || cur==SpAdvance(previous,-2))
             return 2;
     }
-    if(jump==0 && cur==previous) return 1; // relative major/minor
+    if(jump==0 && cur==previous) return 2; // relative major/minor
     const int distance=std::min((cur-goal+12)%12,(goal-cur+12)%12);
     return distance<=1 ? 1 : 0;
 }
@@ -293,13 +293,13 @@ int SpTransitionCost(const PlannerRow* from,const PlannerRow& to) {
     if(!from || SpNumber(from->key)<0 || SpNumber(to.key)<0) return 0;
     const int prior=SpNumber(from->key), next=SpNumber(to.key);
     const bool sameLetter=from->key.back()==to.key.back();
-    // User-defined priority: =, +1, +2, +7, -2, then imperfect transitions.
+    // Priority: same key, relative A/B, +1, +2, +7, -2, then imperfect transitions.
     if(sameLetter && next==prior) return 0;
+    if(next==prior) return 6; // relative minor/major: 10A <-> 10B
     if(sameLetter && next==SpAdvance(prior,1)) return 12;
     if(sameLetter && next==SpAdvance(prior,2)) return 26;
     if(sameLetter && next==SpAdvance(prior,7)) return 40;
     if(sameLetter && next==SpAdvance(prior,-2)) return 54;
-    if(next==prior) return 70; // parallel A/B: preferable to an unrelated key
     return 145;
 }
 constexpr int SP_BPM_SOFT_LIMIT=15;
