@@ -4,7 +4,7 @@
 constexpr int SP_IMPORT=3101, SP_SORT=3102, SP_SORT_SEL=3103, SP_UP=3104,
  SP_DOWN=3105, SP_REMOVE=3106, SP_PLUS2=3107, SP_MINUS2=3108,
  SP_PLUS7=3109, SP_MINUS7=3110, SP_END=3111, SP_UNDO=3112,
- SP_FIND=3113, SP_EXPORT=3114, SP_GOOFY=3115;
+ SP_FIND=3113, SP_EXPORT=3114, SP_GOOFY=3115, SP_BOLD=3116;
 constexpr int SP_LIST=3190;
 struct PlannerRow {
     int type=0; // 0 = song, 1 = transition, 2 = end of playlist
@@ -17,6 +17,8 @@ constexpr UINT_PTR SP_NUMBER_TIMER=3192;
 std::vector<PlannerRow> spRows, spUndo;
 bool spHasUndo=false;
 bool spGoofy=false;
+bool spBoldText=false;
+HFONT spBoldFont=nullptr;
 bool spRendering=false;
 int spDragFrom=-1;
 
@@ -804,7 +806,14 @@ LRESULT CALLBACK SpWndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
             c.pszText=const_cast<wchar_t*>(labels[j]);c.cx=widths[j];c.iSubItem=j;
             ListView_InsertColumn(spList,j,&c);
         }
-        if(g_font) SendMessageW(spList,WM_SETFONT,(WPARAM)g_font,TRUE);
+        // Match WaveCue's existing UI typeface and size, changing weight only.
+        HFONT baseFont=g_font?g_font:(HFONT)GetStockObject(DEFAULT_GUI_FONT);
+        LOGFONTW boldStyle{};
+        if(GetObjectW(baseFont,sizeof(boldStyle),&boldStyle)==sizeof(boldStyle)) {
+            boldStyle.lfWeight=FW_BOLD;
+            spBoldFont=CreateFontIndirectW(&boldStyle);
+        }
+        SendMessageW(spList,WM_SETFONT,(WPARAM)baseFont,TRUE);
         SpAddButton(hwnd,SP_IMPORT,L"Import / Refresh",12,10,124);
         SpAddButton(hwnd,SP_SORT_SEL,L"Sort Selection",145,10,122);
         SpAddButton(hwnd,SP_SORT,L"Sort All",276,10,86);
@@ -834,8 +843,16 @@ LRESULT CALLBACK SpWndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
         SpAddButton(hwnd,SP_END,L"End of Playlist",520,545,137);
         HWND hint=CreateWindowExW(0,L"STATIC",
           L"Select a track for its Winamp number. Double-click or click Lock to lock. Remove only edits the Planner.",
-          WS_CHILD|WS_VISIBLE,12,584,905,23,hwnd,nullptr,g_plugin.hDllInstance,nullptr);
+          WS_CHILD|WS_VISIBLE,12,584,745,23,hwnd,nullptr,g_plugin.hDllInstance,nullptr);
         if(hint&&g_font)SendMessageW(hint,WM_SETFONT,(WPARAM)g_font,TRUE);
+        HWND bold=CreateWindowExW(0,L"BUTTON",L"Bold text",
+            WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_AUTOCHECKBOX,
+            805,582,125,26,hwnd,(HMENU)(INT_PTR)SP_BOLD,
+            g_plugin.hDllInstance,nullptr);
+        if(bold) {
+            if(g_font) SendMessageW(bold,WM_SETFONT,(WPARAM)g_font,TRUE);
+            SendMessageW(bold,BM_SETCHECK,spBoldText?BST_CHECKED:BST_UNCHECKED,0);
+        }
         return 0;
     }
     case WM_TIMER:
@@ -845,6 +862,16 @@ LRESULT CALLBACK SpWndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
         switch(LOWORD(wp)) {
         case SP_IMPORT: SpImport();break;
         case SP_GOOFY:spGoofy=SendMessageW((HWND)lp,BM_GETCHECK,0,0)==BST_CHECKED;break;
+        case SP_BOLD:
+            spBoldText=SendMessageW((HWND)lp,BM_GETCHECK,0,0)==BST_CHECKED;
+            if(spList && IsWindow(spList)) {
+                HFONT font=spBoldText && spBoldFont?spBoldFont:
+                    (g_font?g_font:(HFONT)GetStockObject(DEFAULT_GUI_FONT));
+                SendMessageW(spList,WM_SETFONT,(WPARAM)font,TRUE);
+                RedrawWindow(spList,nullptr,nullptr,
+                    RDW_INVALIDATE|RDW_ERASE|RDW_ALLCHILDREN|RDW_UPDATENOW);
+            }
+            break;
         case SP_EXPORT: SpExportToWinamp(hwnd);break;
         case SP_SORT: SpSort(false);break;
         case SP_SORT_SEL: SpSort(true);break;
@@ -930,7 +957,14 @@ LRESULT CALLBACK SpWndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
             return 0;
         } break;
     case WM_CLOSE:spDragFrom=-1; if(GetCapture()==hwnd)ReleaseCapture();ShowWindow(hwnd,SW_HIDE);return 0;
-    case WM_DESTROY:KillTimer(hwnd,SP_NUMBER_TIMER);spTrackNumber=nullptr;spList=nullptr;spWindow=nullptr;return 0;
+    case WM_DESTROY:
+        KillTimer(hwnd,SP_NUMBER_TIMER);
+        // Detach the owned font before destroying it.
+        if(spList && IsWindow(spList) && spBoldFont)
+            SendMessageW(spList,WM_SETFONT,
+                (WPARAM)(g_font?g_font:GetStockObject(DEFAULT_GUI_FONT)),FALSE);
+        if(spBoldFont) {DeleteObject(spBoldFont);spBoldFont=nullptr;}
+        spTrackNumber=nullptr;spList=nullptr;spWindow=nullptr;return 0;
     }
     return DefWindowProcW(hwnd,msg,wp,lp);
 }
