@@ -73,6 +73,14 @@ int SpHarmonicQuality(int index) {
             return 2;
     }
     if(jump==0 && cur==previous) return 2; // relative major/minor
+    // Same numerical harmonic movement with a different A/B mode is
+    // musically usable, but less secure: yellow rather than red.
+    if(jump==0 && !sameLetter &&
+       (cur==SpAdvance(previous,1) ||
+        cur==SpAdvance(previous,-1) ||
+        cur==SpAdvance(previous,2) ||
+        cur==SpAdvance(previous,7) ||
+        cur==SpAdvance(previous,-2))) return 1;
     const int distance=std::min((cur-goal+12)%12,(goal-cur+12)%12);
     return distance<=1 ? 1 : 0;
 }
@@ -121,7 +129,6 @@ int SpQuality(int index) {
     // +7 is an intentional change of energy, so a wide BPM jump
     // should not automatically downgrade a valid harmonic transition.
     if(previousKey && !previousKey->key.empty() &&
-       previousKey->key.back()==spRows[index].key.back() &&
        SpNumber(spRows[index].key)==SpAdvance(SpNumber(previousKey->key),7))
         return harmonic;
     if(previousTempo &&
@@ -404,6 +411,13 @@ int SpTransitionCost(const PlannerRow* from,const PlannerRow& to) {
     if(sameLetter && next==SpAdvance(prior,2)) return 26;
     if(sameLetter && next==SpAdvance(prior,7)) return 40;
     if(sameLetter && next==SpAdvance(prior,-2)) return 54;
+    // A/B mismatch on an otherwise useful harmonic move is valid,
+    // but carries a higher cost than the same-letter equivalent.
+    if(!sameLetter && next==SpAdvance(prior,1)) return 72;
+    if(!sameLetter && next==SpAdvance(prior,2)) return 86;
+    if(!sameLetter && next==SpAdvance(prior,7)) return 92;
+    if(!sameLetter && next==SpAdvance(prior,-2)) return 104;
+    if(!sameLetter && next==SpAdvance(prior,-1)) return 116;
     return 145;
 }
 constexpr int SP_BPM_SOFT_LIMIT=15;
@@ -417,7 +431,6 @@ int SpTempoCost(const PlannerRow* from,const PlannerRow& to,
     // Keep the existing +7 energy-break exception if even the best
     // half/double interpretation remains wide.
     if(SpNumber(keyFrom->key)>0 && SpNumber(to.key)>0 &&
-       keyFrom->key.back()==to.key.back() &&
        SpNumber(to.key)==SpAdvance(SpNumber(keyFrom->key),7))
         return (difference<=SP_BPM_WARNING_LIMIT?difference/5:5)+adjustment*3;
     if(difference<=SP_BPM_SOFT_LIMIT) return difference/5+adjustment*3;
@@ -898,8 +911,8 @@ LRESULT CALLBACK SpWndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
                         int q=SpQuality(i);
                         draw->clrTextBk=RGB(0,0,0);
                         draw->clrText=spRows[i].locked?RGB(186,216,149):
-                            q==2?RGB(133,224,120):q==1?RGB(240,209,99):
-                            q==0?RGB(237,120,108):RGB(199,213,200);
+                            q==2?RGB(150,225,44):q==1?RGB(245,205,32):
+                            q==0?RGB(240,67,60):RGB(199,213,200);
                     }
                     return CDRF_NEWFONT;
                 }
