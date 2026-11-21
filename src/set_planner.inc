@@ -468,7 +468,7 @@ int SpGoofyTransitionCost(int previous,int current,int repetitions) {
     }
     if(repetitions>=2 && (current==SpAdvance(previous,2) ||
                           current==SpAdvance(previous,7)))
-        return -34; // energy change following two identical numbers
+        return -68; // force +2/+7 ahead of +1 after two repeats
     if(current==SpAdvance(previous,1)) return -12;
     return 0;
 }
@@ -477,7 +477,7 @@ int SpPriorRepeatCount(int firstSlot,int number) {
     int repeated=0;
     for(int i=firstSlot-1;i>=0;--i) {
         const auto& row=spRows[i];
-        if(row.type!=0 || row.locked) break;
+        if(row.type!=0) break;
         const int k=SpNumber(row.key);
         if(k<1) continue;
         if(k!=number) break;
@@ -543,6 +543,20 @@ std::vector<PlannerRow> SpBeamOrder(const std::vector<PlannerRow>& pool,
                 if(forced.anchor && node.path.empty() && hasMatch &&
                    !SpBreakMatches(*forced.anchor,pool[j],forced.jump))
                     continue;
+                // A fourth matching Camelot number is forbidden whenever
+                // another analysed number remains in this movable section.
+                // A/B are treated as the same number for this rule.
+                if(goofy && node.repeatCount>=3 &&
+                   SpNumber(pool[j].key)==node.lastNumber) {
+                    bool alternative=false;
+                    for(int t=0;t<n;++t)
+                        if(!node.used[t] && t!=j &&
+                           SpNumber(pool[t].key)>0 &&
+                           SpNumber(pool[t].key)!=node.lastNumber) {
+                            alternative=true;break;
+                        }
+                    if(alternative) continue;
+                }
                 // Keep unknown/silent songs at the end of the movable run.
                 if(hasKnown && SpNumber(pool[j].key)<0) continue;
                 SpBeamNode candidate=node;
