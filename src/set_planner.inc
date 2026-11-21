@@ -17,6 +17,7 @@ constexpr UINT_PTR SP_NUMBER_TIMER=3192;
 std::vector<PlannerRow> spRows, spUndo;
 bool spHasUndo=false;
 bool spGoofy=false;
+bool spRendering=false;
 int spDragFrom=-1;
 
 int SpNumber(const std::wstring& k) {
@@ -151,6 +152,8 @@ void SpRender(int focus=-1,bool followMove=false) {
     if(!spList || !IsWindow(spList)) return;
     // ListView_DeleteAllItems resets its scroll position. Remember the
     // visible region before rebuilding so edits do not jump the viewport.
+    if(spRendering) return;
+    spRendering=true;
     const int previousTop=ListView_GetTopIndex(spList);
     RECT itemRect{};
     int rowHeight=0;
@@ -173,9 +176,11 @@ void SpRender(int focus=-1,bool followMove=false) {
         std::wstring bpm=row.bpm>0?std::to_wstring(row.bpm):L"--";
         ListView_SetItemText(spList,i,2,const_cast<wchar_t*>(bpm.c_str()));
         ListView_SetItemText(spList,i,3,const_cast<wchar_t*>(row.key.c_str()));
+        const bool inReserve=SpInReserve(i);
+        const int quality=row.type==0 && !inReserve?SpQuality(i):-1;
         std::wstring status=row.type==2?L"RESERVE":row.type==1?SpBreakStatus(i):
-          SpInReserve(i)?L"UNSORTED":SpQuality(i)==2?L"GREEN":
-          SpQuality(i)==1?L"YELLOW":SpQuality(i)==0?L"RED":L"--";
+          inReserve?L"UNSORTED":quality==2?L"GREEN":
+          quality==1?L"YELLOW":quality==0?L"RED":L"--";
         ListView_SetItemText(spList,i,4,const_cast<wchar_t*>(status.c_str()));
         std::wstring lock=row.locked?L"LOCKED":L"";
         ListView_SetItemText(spList,i,5,const_cast<wchar_t*>(lock.c_str()));
@@ -204,6 +209,7 @@ void SpRender(int focus=-1,bool followMove=false) {
     // Win32's partial scroll optimizations, which left visual artifacts.
     RedrawWindow(spList,nullptr,nullptr,
         RDW_INVALIDATE|RDW_ERASE|RDW_FRAME|RDW_ALLCHILDREN|RDW_UPDATENOW);
+    spRendering=false;
     SpUpdateTrackNumber();
 }
 void SpImport() {
@@ -252,7 +258,7 @@ int SpCurrentWinampPosition(const PlannerRow& row) {
     return -1;
 }
 void SpUpdateTrackNumber() {
-    if(!spTrackNumber || !IsWindow(spTrackNumber)) return;
+    if(spRendering || !spTrackNumber || !IsWindow(spTrackNumber)) return;
     int selected=spList?ListView_GetNextItem(spList,-1,LVNI_FOCUSED):-1;
     if(selected<0 || selected>=(int)spRows.size() ||
        !(ListView_GetItemState(spList,selected,LVIS_SELECTED)&LVIS_SELECTED))
@@ -855,7 +861,7 @@ LRESULT CALLBACK SpWndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
     case WM_NOTIFY: {
         auto* hdr=reinterpret_cast<NMHDR*>(lp);
         if(hdr && hdr->hwndFrom==spList) {
-            if(hdr->code==LVN_ITEMCHANGED || hdr->code==NM_CLICK) {
+            if(!spRendering && (hdr->code==LVN_ITEMCHANGED || hdr->code==NM_CLICK)) {
                 SpUpdateTrackNumber();
             }
             if(hdr->code==LVN_BEGINDRAG) {
