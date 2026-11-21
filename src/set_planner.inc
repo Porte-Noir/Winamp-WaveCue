@@ -4,7 +4,7 @@
 constexpr int SP_IMPORT=3101, SP_SORT=3102, SP_SORT_SEL=3103, SP_UP=3104,
  SP_DOWN=3105, SP_REMOVE=3106, SP_PLUS2=3107, SP_MINUS2=3108,
  SP_PLUS7=3109, SP_MINUS7=3110, SP_END=3111, SP_UNDO=3112,
- SP_FIND=3113, SP_EXPORT=3114;
+ SP_FIND=3113, SP_EXPORT=3114, SP_GOOFY=3115;
 constexpr int SP_LIST=3190;
 struct PlannerRow {
     int type=0; // 0 = song, 1 = transition, 2 = end of playlist
@@ -16,6 +16,7 @@ HWND spWindow=nullptr, spList=nullptr, spTrackNumber=nullptr;
 constexpr UINT_PTR SP_NUMBER_TIMER=3192;
 std::vector<PlannerRow> spRows, spUndo;
 bool spHasUndo=false;
+bool spGoofy=false;
 int spDragFrom=-1;
 
 int SpNumber(const std::wstring& k) {
@@ -300,10 +301,64 @@ bool SpMoveAcrossLocks(int source,int target) {
     return true;
 }
 void SpMove(int direction) {
-    const int source=SpSelectedFirst();
-    if(source<0 || spRows[source].locked) return;
-    const int target=SpNextUnlocked(source,direction);
-    if(target>=0) SpMoveAcrossLocks(source,target);
+    if(!spList || spRows.empty()) return;
+    const int n=(int)spRows.size();
+    std::vector<unsigned char> selected(n,0);
+    int count=0;
+    for(int i=-1;(i=ListView_GetNextItem(spList,i,LVNI_SELECTED))!=-1;) {
+        if(i>=0 && i<n) {selected[i]=1;++count;}
+    }
+    if(!count) return;
+    // A single click keeps the familiar behavior. For multi-selection, move
+    // all selected unlocked rows one available slot, preserving their order.
+    // Locked rows never move, even if they are selected.
+    if(count==1) {
+        const int source=SpSelectedFirst();
+        if(source<0 || spRows[source].locked) return;
+        const int target=SpNextUnlocked(source,direction);
+        if(target>=0) SpMoveAcrossLocks(source,target);
+        return;
+    }
+    std::vector<int> available;
+    for(int i=0;i<n;++i) if(!spRows[i].locked) available.push_back(i);
+    bool canMove=false;
+    if(direction<0) {
+        for(int k=1;k<(int)available.size();++k)
+            if(selected[available[k]] && !selected[available[k-1]]) {canMove=true;break;}
+    } else {
+        for(int k=0;k+1<(int)available.size();++k)
+            if(selected[available[k]] && !selected[available[k+1]]) {canMove=true;break;}
+    }
+    if(!canMove) return;
+    SpSnapshot();
+    if(direction<0) {
+        for(int k=1;k<(int)available.size();++k) {
+            const int from=available[k],to=available[k-1];
+            if(selected[from] && !selected[to]) {
+                std::swap(spRows[from],spRows[to]);
+                std::swap(selected[from],selected[to]);
+            }
+        }
+    } else {
+        for(int k=(int)available.size()-2;k>=0;--k) {
+            const int from=available[k],to=available[k+1];
+            if(selected[from] && !selected[to]) {
+                std::swap(spRows[from],spRows[to]);
+                std::swap(selected[from],selected[to]);
+            }
+        }
+    }
+    SpRender();
+    int first=-1;
+    for(int i=0;i<n;++i) if(selected[i]) {
+        ListView_SetItemState(spList,i,LVIS_SELECTED,LVIS_SELECTED);
+        if(first<0) first=i;
+    }
+    if(first>=0) {
+        ListView_SetItemState(spList,first,LVIS_FOCUSED,LVIS_FOCUSED);
+        ListView_EnsureVisible(spList,first,FALSE);
+    }
+    SpUpdateTrackNumber();
 }
 void SpRemoveSelected() {
     if(!spList || spRows.empty()) return;
@@ -402,18 +457,49 @@ bool SpBreakMatches(const PlannerRow& before,const PlannerRow& next,int shift) {
     return a>0 && b>0 && before.key.back()==next.key.back() &&
            b==SpAdvance(a,shift);
 }
+// Goofy is a separate planning preference. It never changes the
+// harmonic-color evaluation, BPM matching, or manual break rules.
+int SpGoofyTransitionCost(int previous,int current,int repetitions) {
+    if(previous<1 || current<1) return 0;
+    if(previous==current) {
+        if(repetitions>=3) return 1200; // never four unless unavoidable
+        if(repetitions==2) return 240;  // strongly discourage a third
+        return 18; // prefer +1 slightly over an identical number
+    }
+    if(repetitions>=2 && (current==SpAdvance(previous,2) ||
+                          current==SpAdvance(previous,7)))
+        return -34; // energy change following two identical numbers
+    if(current==SpAdvance(previous,1)) return -12;
+    return 0;
+}
+int SpPriorRepeatCount(int firstSlot,int number) {
+    if(number<1) return 0;
+    int repeated=0;
+    for(int i=firstSlot-1;i>=0;--i) {
+        const auto& row=spRows[i];
+        if(row.type!=0 || row.locked) break;
+        const int k=SpNumber(row.key);
+        if(k<1) continue;
+        if(k!=number) break;
+        ++repeated;
+    }
+    return repeated;
+}
 struct SpBeamNode {
     std::vector<int> path;
     std::vector<unsigned char> used;
     int score=0;
     int orderScore=0;
     int last=-1;
+    int lastNumber=-1;
+    int repeatCount=0;
 };
 std::vector<PlannerRow> SpBeamOrder(const std::vector<PlannerRow>& pool,
                                     const PlannerRow* before,
                                     const PlannerRow* after,
                                     const PlannerRow* beforeTempo,
-                                    SpBreakConstraint forced) {
+                                    SpBreakConstraint forced,
+                                    bool goofy,int initialRepetitions) {
     const int n=(int)pool.size();
     if(n<=1) return pool;
     // A hard break is enforced only if the selected run actually contains
@@ -430,6 +516,8 @@ std::vector<PlannerRow> SpBeamOrder(const std::vector<PlannerRow>& pool,
     constexpr size_t width=96;
     std::vector<SpBeamNode> beam(1);
     beam[0].used.assign(n,0);
+    if(before) beam[0].lastNumber=SpNumber(before->key);
+    if(goofy) beam[0].repeatCount=initialRepetitions;
     for(int depth=0;depth<n;++depth) {
         std::vector<SpBeamNode> next;
         next.reserve(beam.size()*n);
@@ -461,9 +549,15 @@ std::vector<PlannerRow> SpBeamOrder(const std::vector<PlannerRow>& pool,
                 candidate.used[j]=1;
                 candidate.path.push_back(j);
                 candidate.last=j;
+                const int number=SpNumber(pool[j].key);
+                const int playful=goofy ? SpGoofyTransitionCost(node.lastNumber,number,node.repeatCount) : 0;
+                if(number>0) {
+                    candidate.repeatCount=(number==node.lastNumber)?node.repeatCount+1:1;
+                    candidate.lastNumber=number;
+                }
                 const int cost=SpTransitionCost(previous,pool[j])+
                                SpTempoCost(tempoPrevious,pool[j],previous);
-                candidate.score+=cost;
+                candidate.score+=cost+playful;
                 // Stable order for equally good sequences.
                 candidate.orderScore+=abs(j-depth);
                 // On the final track, evaluate the fixed exit track as well.
@@ -557,7 +651,8 @@ void SpSort(bool selectionOnly) {
             // The marker's predecessor is the real harmonic starting point,
             // even though the marker separates the two sorted sections.
             if(forced.anchor) before=forced.anchor;
-            const auto optimized=SpBeamOrder(run,before,after,beforeTempo,forced);
+            const int repetitions=spGoofy && before ? SpPriorRepeatCount(firstSlot,SpNumber(before->key)) : 0;
+            const auto optimized=SpBeamOrder(run,before,after,beforeTempo,forced,spGoofy,repetitions);
             for(int j=cursor;j<last;++j)
                 spRows[slots[j]]=optimized[j-cursor];
             cursor=last;
@@ -680,6 +775,10 @@ LRESULT CALLBACK SpWndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
         SpAddButton(hwnd,SP_SORT_SEL,L"Sort Selection",145,10,122);
         SpAddButton(hwnd,SP_SORT,L"Sort All",276,10,86);
         SpAddButton(hwnd,SP_UNDO,L"Undo",371,10,70);
+        HWND goofy=CreateWindowExW(0,L"BUTTON",L"Goofy",WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_AUTOCHECKBOX,
+            641,12,95,23,hwnd,(HMENU)(INT_PTR)SP_GOOFY,g_plugin.hDllInstance,nullptr);
+        if(goofy) {if(g_font) SendMessageW(goofy,WM_SETFONT,(WPARAM)g_font,TRUE);
+            SendMessageW(goofy,BM_SETCHECK,spGoofy?BST_CHECKED:BST_UNCHECKED,0);}
         SpAddButton(hwnd,SP_EXPORT,L"Export to Winamp",764,10,168);
         HWND numberLabel=CreateWindowExW(0,L"STATIC",L"WINAMP #",
             WS_CHILD|WS_VISIBLE|SS_LEFT,465,15,95,21,hwnd,nullptr,
@@ -711,6 +810,7 @@ LRESULT CALLBACK SpWndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
     case WM_COMMAND:
         switch(LOWORD(wp)) {
         case SP_IMPORT: SpImport();break;
+        case SP_GOOFY:spGoofy=SendMessageW((HWND)lp,BM_GETCHECK,0,0)==BST_CHECKED;break;
         case SP_EXPORT: SpExportToWinamp(hwnd);break;
         case SP_SORT: SpSort(false);break;
         case SP_SORT_SEL: SpSort(true);break;
