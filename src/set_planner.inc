@@ -910,9 +910,12 @@ LRESULT CALLBACK SpWndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
                     if(i>=0&&i<(int)spRows.size()) {
                         int q=SpQuality(i);
                         draw->clrTextBk=RGB(0,0,0);
-                        draw->clrText=spRows[i].locked?RGB(186,216,149):
-                            q==2?RGB(150,225,44):q==1?RGB(245,205,32):
-                            q==0?RGB(240,67,60):RGB(199,213,200);
+                        // User-selected Win32 color dialog HSL palette (scale 0..240):
+                        // Green H80 S240 L103, Red H0 S237 L103,
+                        // Yellow H40 S240 L120, Locked H160 S240 L120.
+                        draw->clrText=spRows[i].locked?RGB(0,0,255):
+                            q==2?RGB(0,219,0):q==1?RGB(255,255,0):
+                            q==0?RGB(218,2,2):RGB(199,213,200);
                     }
                     return CDRF_NEWFONT;
                 }
