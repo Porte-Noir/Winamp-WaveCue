@@ -546,7 +546,8 @@ std::vector<PlannerRow> SpBeamOrder(const std::vector<PlannerRow>& pool,
                 // A fourth matching Camelot number is forbidden whenever
                 // another analysed number remains in this movable section.
                 // A/B are treated as the same number for this rule.
-                if(goofy && node.repeatCount>=3 &&
+                if(goofy && !(forced.anchor && node.path.empty()) &&
+                   node.repeatCount>=3 &&
                    SpNumber(pool[j].key)==node.lastNumber) {
                     bool alternative=false;
                     for(int t=0;t<n;++t)
