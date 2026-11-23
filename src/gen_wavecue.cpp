@@ -2254,17 +2254,17 @@ void ShowPropertiesPage(int page) {
         AddPrefControl(SS_LEFT, L"STATIC", L"WaveCue - About",
             218, 20, 420, 24);
         AddPrefControl(SS_LEFT, L"STATIC",
-            L"WaveCue est ne du besoin de Le Porte-Noir,\r\n"
-            L"DJ independant, de preparer des morceaux dans\r\n"
-            L"Winamp classique : waveform, cues IN/OUT et\r\n"
-            L"controle immediat en concert ou en diffusion.\r\n\r\n"
-            L"Conception et essais : Le Porte-Noir et les\r\n"
-            L"contributeurs du projet WaveCue.\r\n\r\n"
+            L"WaveCue est ne du besoin de Porte-Noir :\r\n"
+            L"faire evoluer Winamp pour preparer ses sets,\r\n"
+            L"visualiser les formes d'onde et ses cues.\r\n\r\n"
+            L"Conception et essais : Porte-Noir.\r\n"
+            L"Developpement assiste par IA :\r\n"
+            L"ChatGPT (OpenAI).\r\n\r\n"
             L"Composants : libKeyFinder, FFTW, BTrack,\r\n"
             L"libsamplerate, dr_flac, stb_vorbis.\r\n\r\n"
-            L"Code source WaveCue : MIT (voir LICENSE).\r\n"
-            L"Distribution binaire : respecter egalement les\r\n"
-            L"licences des bibliotheques integrees.",
+            L"Plugin compile : licence GNU GPLv3.\r\n"
+            L"Code WaveCue original : licence MIT.\r\n"
+            L"Details : LICENSE et THIRD_PARTY_NOTICES.md.",
             219, 68, 425, 350);
     }
     InvalidateRect(g_propertiesHwnd, nullptr, TRUE);

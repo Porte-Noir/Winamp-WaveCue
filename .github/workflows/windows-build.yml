@@ -113,6 +113,9 @@ jobs:
             'dist/SHA256SUMS.txt'
           )
           if (gh release view $tag --repo $env:GITHUB_REPOSITORY 2>$null) {
+            # If a prior RC1 run created the tag, align it with the freshly built release commit.
+            gh api --method PATCH "repos/$env:GITHUB_REPOSITORY/git/refs/tags/$tag" -f sha="$env:GITHUB_SHA" -F force=true | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw 'Failed to update RC1 tag' }
             gh release upload $tag $assets --repo $env:GITHUB_REPOSITORY --clobber
             if ($LASTEXITCODE -ne 0) { throw 'Failed to update RC1 assets' }
             gh release edit $tag --repo $env:GITHUB_REPOSITORY --prerelease --notes-file docs/RELEASE_NOTES_RC1.md
