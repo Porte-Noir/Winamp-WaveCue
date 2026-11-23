@@ -127,14 +127,22 @@ int SpQuality(int index) {
         if(!previousTempo && prior.bpm>0) previousTempo=&prior;
         if(previousKey && previousTempo) break;
     }
-    // +7 is an intentional change of energy, so a wide BPM jump
-    // should not automatically downgrade a valid harmonic transition.
-    if(previousKey && !previousKey->key.empty() &&
-       SpNumber(spRows[index].key)==SpAdvance(SpNumber(previousKey->key),7))
-        return harmonic;
-    if(previousTempo &&
-       SpEffectiveTempoGap(previousTempo->bpm,spRows[index].bpm)>20)
-        return 1;
+    // Half/double tempo compatibility is useful for sorting, but the
+    // original BPM values still describe an audible rhythmic risk.
+    // Warn in yellow whenever a correction was actually needed, even +7.
+    if(previousTempo) {
+        int adjustment=0;
+        const int difference=SpEffectiveTempoGap(
+            previousTempo->bpm,spRows[index].bpm,&adjustment);
+        if(adjustment>0) return 1;
+        // +7 is an intentional energy change: exempt a direct wide
+        // tempo jump, but never conceal an inferred half/double tempo.
+        if(previousKey && !previousKey->key.empty() &&
+           SpNumber(spRows[index].key)==SpAdvance(
+               SpNumber(previousKey->key),7))
+            return harmonic;
+        if(difference>20) return 1;
+    }
     return harmonic;
 }
 std::wstring SpBreakStatus(int index) {
