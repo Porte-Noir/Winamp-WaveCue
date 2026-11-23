@@ -6,6 +6,20 @@ WaveCue is a free, open-source **General Purpose plugin for classic 32-bit Winam
 
 **v1.0.0-rc1 is a prerelease.** WaveCue is an independent community extension, not affiliated with Winamp.
 
+## Screenshots
+
+### WaveCue in classic Winamp
+
+![WaveCue running alongside classic Winamp](screenshots/screenshot%20wavecue.jpg)
+
+### WaveCue waveform windows
+
+![WaveCue Actually Playing and Selected Track waveforms](screenshots/screenshot%20wavecue%20seul.jpg)
+
+### Set Planner
+
+![Set Planner for harmonic DJ set preparation](screenshots/screenshot%20planner%20seul.jpg)
+
 ## Download and install
 
 1. Download **WaveCue-v1.0.0-rc1-win32.zip** under [GitHub Releases](../../releases). Choose this ZIP, not the automatically generated source ZIP.
