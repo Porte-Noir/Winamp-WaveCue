@@ -1,8 +1,8 @@
-# WaveCue + Set Planner for classic Winamp
+# WaveCue — modern DJ tools and waveform plugin for classic Winamp
 
-**Waveforms, cue points, harmonic analysis and DJ set planning — inside Winamp.**
+**Modernize classic Winamp with waveform displays, cue points, BPM and key analysis, and DJ set planning — without replacing your music player.**
 
-WaveCue is a free, open-source **General Purpose plugin for classic 32-bit Winamp 5.x**. It adds two waveform views, persistent In/Out cues, BPM and key detection, and an integrated **Set Planner**.
+WaveCue is a free, open-source **General Purpose plugin for classic 32-bit Winamp 5.x** on Windows. For listeners looking for a Winamp modernization, enhancement or DJ extension, it adds two waveform views, persistent In/Out cues, BPM and musical-key detection, and an integrated **Set Planner**.
 
 **v1.0.0-rc1 is a prerelease.** WaveCue is an independent community extension, not affiliated with Winamp.
 
@@ -15,6 +15,10 @@ WaveCue is a free, open-source **General Purpose plugin for classic 32-bit Winam
 5. Open **Set Planner** from WaveCue's preferences. It is built into the same DLL.
 
 See [INSTALL.md](INSTALL.md) for updating, removing and troubleshooting.
+
+## What does WaveCue add to Winamp?
+
+WaveCue keeps the familiar Winamp interface and playlist workflow while adding preparation and mixing-oriented tools. It is especially suited to DJs, internet-radio presenters and music streamers who want to keep using classic Winamp rather than switch to a complete DJ application.
 
 ## WaveCue features
 
@@ -54,4 +58,8 @@ Every official binary ZIP is accompanied by a **matching corresponding-source ZI
 
 Read [the story behind WaveCue](docs/PROJECT_HISTORY.md).
 
-Search terms: Winamp plugin, waveform, DJ set planner, cue points, BPM, Camelot, harmonic mixing, playlist editor, streaming delay, Twitch DJ, VRChat DJ.
+## Finding WaveCue
+
+Common search descriptions include **Winamp modernization**, **Winamp enhancement plugin**, **Winamp waveform plugin**, **Winamp cue points**, **Winamp BPM and key detection** and **DJ set planner for Winamp**. WaveCue is a community-built enhancement for classic Winamp 5.x, not a replacement player.
+
+Source and downloads: [GitHub releases](../../releases).
