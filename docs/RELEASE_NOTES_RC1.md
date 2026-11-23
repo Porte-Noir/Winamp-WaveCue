@@ -1,34 +1,32 @@
 # WaveCue + Set Planner — v1.0.0-rc1
 
-**Status: DRAFT — do not publish until the current source and Windows build have been verified.**
+**First public release candidate** for classic 32-bit Winamp, with integrated Set Planner.
 
-This is the first public release candidate of WaveCue and its Set Planner companion for classic 32-bit Winamp.
+## Highlights
 
-## Intended features (verify against the final build)
+- Waveforms for selected and actually playing tracks
+- In/Out cue editing, per-track Auto In/Out and protected Seek
+- Key detection in Camelot notation and BPM analysis
+- Cached loading, playlist batch preloading and streaming-delay display
+- Set Planner: harmonic transitions, locks, manual arrangement, undo, and export to Winamp
+- French-language options in WaveCue preferences
+- Latest change: **yellow indication of inferred half/double BPM** while preserving the existing sort logic
 
-- Waveforms for the currently playing and selected tracks
-- Persistent In/Out cues and optional automatic cue playback
-- Protected seek mode and track preview
-- BPM and musical-key analysis with Camelot notation
-- Optional playlist preloading and cached waveform data
-- Adjustable streaming-delay visualization
-- Set Planner for arranging playlist order, checking harmonic transitions, locking tracks and exporting the plan to Winamp
+## Install
 
-## Installation
+Download **WaveCue-v1.0.0-rc1-win32.zip** in the Assets section. Exit Winamp and copy gen_wavecue.dll to the Plugins directory. Restart Winamp. Set Planner is built into WaveCue.
 
-1. Close Winamp.
-2. Download the release ZIP from GitHub Releases.
-3. Extract the ZIP and follow the included installation instructions.
-4. Restart Winamp and open WaveCue from Winamp's General Purpose plugins.
+For upgrades and removal, see [INSTALL.md](INSTALL.md).
 
-**Compatibility and exact package contents must be confirmed against the final compiled version.**
+## License and source
 
-## Known limitations
+The combined plugin is distributed under **GNU GPL version 3**, because it statically links GPL-licensed libraries. Download the **WaveCue-v1.0.0-rc1-source.zip** alongside the binary: this contains corresponding source code and build recipes, including external libraries not in GitHub's auto-generated source archive.
 
-This is a release candidate. Please report issues with your Windows version, Winamp version, audio format and steps to reproduce.
+Third-party credits and license details: [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
-## Acknowledgements
+## Credits
 
-Concept, direction and testing: **Porte-Noir**. AI-assisted development: **ChatGPT (OpenAI)**.
+**Concept, direction, testing:** Porte-Noir  
+**AI-assisted development:** ChatGPT (OpenAI)
 
-Source code is available under the MIT license.
+This is a prerelease. Reproducible bug reports are welcome through GitHub Issues.
